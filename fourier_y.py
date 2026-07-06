@@ -65,6 +65,8 @@ class FourierConfig:
     min_ring_chips: int = 20
     group_cols: tuple[str, ...] = ("root_lot_id", "wafer_id")
     geometry_cols: tuple[str, ...] = ("item_id",)
+    item_id_col: str = "item_id"
+    item_id_value: str | None = None
     x_col: str = "chip_x_pos"
     y_col: str = "chip_y_pos"
     value_col: str = "y_value"
@@ -203,6 +205,35 @@ def filter_latest_update_rows(df: pl.DataFrame, *, group_cols: list[str], update
         working.join(latest, on=group_cols, how="left")
         .filter(pl.col(update_key) == pl.col("_latest_update_key"))
         .drop("_update_text", "_update_dt", "_latest_update_key")
+    )
+
+
+def filter_item_id_rows(df: pl.DataFrame, *, item_id_col: str, item_id_value: str | None) -> pl.DataFrame:
+    """Keep only rows matching the requested item_id string value."""
+
+    if item_id_value is None or str(item_id_value).strip() == "":
+        return df
+
+    _validate_columns(df, [item_id_col])
+    requested_item_id = str(item_id_value).strip()
+    filtered = df.filter(
+        pl.col(item_id_col).cast(pl.Utf8, strict=False).str.strip_chars() == requested_item_id
+    )
+    if filtered.height:
+        return filtered
+
+    available = (
+        df.select(pl.col(item_id_col).cast(pl.Utf8, strict=False).str.strip_chars().alias(item_id_col))
+        .get_column(item_id_col)
+        .drop_nulls()
+        .unique()
+        .sort()
+        .head(20)
+        .to_list()
+    )
+    raise ValueError(
+        f"No rows remain after filtering {item_id_col} == {requested_item_id!r}. "
+        f"Available examples: {available}"
     )
 
 
@@ -454,10 +485,16 @@ def run_fourier_y(config: FourierConfig, *, write_csv: bool = True) -> FourierRu
     harmonics = _resolve_harmonics(config)
     group_cols = list(config.group_cols)
     geometry_cols = list(config.geometry_cols)
+    item_id_filter_col = (
+        config.item_id_col
+        if config.item_id_value is not None and str(config.item_id_value).strip() != ""
+        else None
+    )
     requested_columns = _unique_columns(
         [
             *group_cols,
             *geometry_cols,
+            item_id_filter_col,
             config.x_col,
             config.y_col,
             config.value_col,
@@ -466,6 +503,7 @@ def run_fourier_y(config: FourierConfig, *, write_csv: bool = True) -> FourierRu
     )
 
     df = read_selected_csv(Path(config.input_path), requested_columns)
+    df = filter_item_id_rows(df, item_id_col=config.item_id_col, item_id_value=config.item_id_value)
     df = filter_latest_update_rows(df, group_cols=group_cols, update_col=config.update_col)
     polar_df, geometries = attach_polar_coordinates(
         df,
@@ -508,6 +546,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--min-ring-chips", type=int, default=20)
     parser.add_argument("--group-cols", default="root_lot_id,wafer_id")
     parser.add_argument("--geometry-cols", default="item_id")
+    parser.add_argument("--item-id-col", default="item_id")
+    parser.add_argument("--item-id", default=None, help="String item_id value to keep, for example MSR0022.")
     parser.add_argument("--x-col", default="chip_x_pos")
     parser.add_argument("--y-col", default="chip_y_pos")
     parser.add_argument("--value-col", default="y_value")
@@ -533,6 +573,8 @@ def main() -> None:
         min_ring_chips=args.min_ring_chips,
         group_cols=_split_columns(args.group_cols),
         geometry_cols=_split_columns(args.geometry_cols),
+        item_id_col=args.item_id_col,
+        item_id_value=args.item_id,
         x_col=args.x_col,
         y_col=args.y_col,
         value_col=args.value_col,

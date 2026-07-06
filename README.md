@@ -37,6 +37,8 @@ last_update_time
 
 같은 `root_lot_id + wafer_id`에 여러 snapshot이 있으면 `last_update_time`이 가장 최신인 row만 사용합니다.
 
+사용자는 `item_id` 칼럼값도 입력합니다. 예를 들어 `item_id`가 `MSR0022`인 row만 계산하려면 notebook에서 `ITEM_ID = "MSR0022"`로 지정합니다.
+
 ## Notebook Usage
 
 1. `wafer_fourier_y.ipynb`를 엽니다.
@@ -46,6 +48,7 @@ last_update_time
 ```python
 INPUT_FILE = Path("input.txt")
 OUTPUT_CSV = Path("fourier_y_output.csv")
+ITEM_ID = "MSR0022"
 
 INNER_RADIUS = 0.6
 OUTER_RADIUS = 1.0
@@ -70,6 +73,7 @@ python3 fourier_y.py input.txt -o fourier_y_output.csv
 ```bash
 python3 fourier_y.py input.csv \
   -o output.csv \
+  --item-id MSR0022 \
   --inner-radius 0.6 \
   --outer-radius 1.0 \
   --target-harmonic 16 \
