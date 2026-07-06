@@ -390,6 +390,132 @@ def _fourier_phase(theta: np.ndarray, y: np.ndarray, harmonic: int) -> float:
     return float(np.angle(coefficient))
 
 
+def max_calculable_harmonic(angular_bins: int) -> int:
+    """Return the Nyquist-limited maximum harmonic for a binned theta signal."""
+
+    if angular_bins < 2:
+        raise ValueError("angular_bins must be at least 2 to compute a harmonic spectrum.")
+    return angular_bins // 2
+
+
+def filter_wafer_rows(
+    df: pl.DataFrame,
+    wafer_key: tuple[object, ...],
+    *,
+    group_cols: tuple[str, ...] | list[str] = ("root_lot_id", "wafer_id"),
+) -> pl.DataFrame:
+    """Filter a DataFrame to one wafer key, for example ("ABCDE", 10)."""
+
+    group_cols = list(group_cols)
+    if len(wafer_key) != len(group_cols):
+        raise ValueError(f"wafer_key must have {len(group_cols)} values matching {group_cols}.")
+    _validate_columns(df, group_cols)
+
+    condition = pl.lit(True)
+    for column, value in zip(group_cols, wafer_key):
+        condition = condition & (
+            pl.col(column).cast(pl.Utf8, strict=False).str.strip_chars() == str(value).strip()
+        )
+    selected = df.filter(condition)
+    if selected.height:
+        return selected
+
+    available = df.select(group_cols).unique().head(20)
+    raise ValueError(f"No rows found for wafer_key={wafer_key!r}. Available examples:\n{available}")
+
+
+def build_wafer_theta_signal(
+    analysis_df: pl.DataFrame,
+    wafer_key: tuple[object, ...],
+    *,
+    group_cols: tuple[str, ...] | list[str] = ("root_lot_id", "wafer_id"),
+    y_col: str = "y_value",
+    inner_radius: float = 0.6,
+    outer_radius: float = 1.0,
+    angular_bins: int = 384,
+) -> pl.DataFrame:
+    """Build mean y-value in annulus vs theta for one selected wafer."""
+
+    if angular_bins < 1:
+        raise ValueError("angular_bins must be >= 1.")
+    if not (0.0 <= inner_radius < outer_radius):
+        raise ValueError("inner_radius must be non-negative and smaller than outer_radius.")
+
+    _validate_columns(analysis_df, [*list(group_cols), y_col, "_theta", "_radius_norm"])
+    wafer_df = filter_wafer_rows(analysis_df, wafer_key, group_cols=group_cols)
+    numeric = wafer_df.select(
+        pl.col(y_col).cast(pl.Float64, strict=False).alias("_y"),
+        pl.col("_theta").cast(pl.Float64, strict=False),
+        pl.col("_radius_norm").cast(pl.Float64, strict=False),
+    )
+    y_all = numeric.get_column("_y").to_numpy()
+    theta_all = numeric.get_column("_theta").to_numpy()
+    radius_all = numeric.get_column("_radius_norm").to_numpy()
+    finite = np.isfinite(y_all) & np.isfinite(theta_all) & np.isfinite(radius_all)
+    ring = finite & (radius_all >= inner_radius) & (radius_all <= outer_radius)
+
+    if not np.any(ring):
+        return pl.DataFrame(
+            schema={
+                "theta_bin": pl.Int64,
+                "theta_rad": pl.Float64,
+                "mean_y_value": pl.Float64,
+                "chip_count": pl.Int64,
+            }
+        )
+
+    theta = theta_all[ring]
+    y = y_all[ring]
+    theta01 = (theta + math.pi) / (2.0 * math.pi)
+    bins = np.floor(theta01 * angular_bins).astype(int) % angular_bins
+    counts = np.bincount(bins, minlength=angular_bins).astype(float)
+    sums = np.bincount(bins, weights=y, minlength=angular_bins).astype(float)
+    valid = counts > 0
+    centers = -math.pi + (np.arange(angular_bins, dtype=float) + 0.5) * (2.0 * math.pi / angular_bins)
+    averaged = np.divide(sums, counts, out=np.zeros_like(sums), where=valid)
+
+    return pl.DataFrame(
+        {
+            "theta_bin": np.nonzero(valid)[0].astype(np.int64),
+            "theta_rad": centers[valid],
+            "mean_y_value": averaged[valid],
+            "chip_count": counts[valid].astype(np.int64),
+        }
+    )
+
+
+def compute_harmonic_spectrum(
+    theta_signal_df: pl.DataFrame,
+    *,
+    angular_bins: int = 384,
+    max_harmonic: int | None = None,
+    theta_col: str = "theta_rad",
+    value_col: str = "mean_y_value",
+) -> pl.DataFrame:
+    """Compute amplitudes for harmonics 1..max_harmonic from a theta signal."""
+
+    if max_harmonic is None:
+        max_harmonic = max_calculable_harmonic(angular_bins)
+    if max_harmonic < 1:
+        raise ValueError("max_harmonic must be >= 1.")
+    if max_harmonic > max_calculable_harmonic(angular_bins):
+        raise ValueError(f"max_harmonic cannot exceed angular_bins / 2 = {angular_bins // 2}.")
+
+    _validate_columns(theta_signal_df, [theta_col, value_col])
+    theta = theta_signal_df.get_column(theta_col).to_numpy()
+    y = theta_signal_df.get_column(value_col).to_numpy()
+    harmonics = list(range(1, max_harmonic + 1))
+    amplitudes = _fourier_amplitudes(theta, y, harmonics)
+
+    return pl.DataFrame(
+        {
+            "harmonic": harmonics,
+            "frequency_cycles_per_revolution": harmonics,
+            "amplitude": [amplitudes[harmonic] for harmonic in harmonics],
+        }
+    )
+
+
 def compute_wafer_signals(
     df: pl.DataFrame,
     *,

@@ -10,14 +10,15 @@ Wafer map chip-level `.csv` 또는 comma-separated `.txt` 파일에서 wafer별 
 
 ## Auto Install
 
-Notebook 첫 번째 셀과 `fourier_y.py`는 필요한 package가 설치되어 있지 않으면 아래 exact version을 자동 설치합니다.
+Notebook 첫 번째 셀은 아래 package가 설치되어 있지 않으면 exact version으로 자동 설치합니다.
 
 ```text
 numpy==1.26.4
 polars==1.14.0
+matplotlib==3.9.2
 ```
 
-`fourier_y.py`와 notebook 계산에는 `numpy`, `polars`가 필요합니다.
+`fourier_y.py`를 CLI로 실행할 때는 계산에 필요한 `numpy`, `polars`만 자동 설치합니다. Notebook 차트에는 `matplotlib`도 사용합니다.
 
 ## Input Columns
 
@@ -49,6 +50,7 @@ last_update_time
 INPUT_FILE = Path("input.txt")
 OUTPUT_CSV = Path("fourier_y_output.csv")
 ITEM_ID = "MSR0022"
+WAFER_TO_PLOT = ("ABCDE", 10)
 
 INNER_RADIUS = 0.6
 OUTER_RADIUS = 1.0
@@ -60,6 +62,7 @@ MIN_RING_CHIPS = 20
 4. `Run` 셀을 실행합니다.
 5. 결과 CSV는 `OUTPUT_CSV` 경로에 저장됩니다.
 6. 분석에 실제 사용된 chip-level Polars DataFrame은 notebook 변수 `analysis_df`에 남습니다.
+7. `WAFER_TO_PLOT`에 지정한 wafer의 `mean_y_value in annulus vs theta [rad]` 차트와 harmonic amplitude spectrum을 확인합니다.
 
 ## CLI Usage
 
@@ -123,3 +126,5 @@ Notebook 변수:
 
 - `result`: wafer-level 결과 Polars DataFrame
 - `analysis_df`: `item_id` 필터와 latest snapshot 필터가 적용되고 `_theta`, `_radius_norm`이 추가된 chip-level Polars DataFrame
+- `theta_signal_df`: `WAFER_TO_PLOT`에 해당하는 wafer의 annulus theta-bin 평균 y-value Polars DataFrame
+- `harmonic_spectrum_df`: harmonic 1부터 `ANGULAR_BINS / 2`까지의 amplitude Polars DataFrame
