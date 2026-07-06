@@ -59,6 +59,7 @@ MIN_RING_CHIPS = 20
 
 4. `Run` 셀을 실행합니다.
 5. 결과 CSV는 `OUTPUT_CSV` 경로에 저장됩니다.
+6. 분석에 실제 사용된 chip-level Polars DataFrame은 notebook 변수 `analysis_df`에 남습니다.
 
 ## CLI Usage
 
@@ -117,3 +118,8 @@ snr_weighted_fourier_y = fourier_y_value * signal_to_noise
 - `ring_std_y`: annulus theta signal 표준편차
 - `ring_chip_count`: annulus 계산에 사용된 chip 수
 - `ring_coverage`: 전체 유효 chip 중 annulus chip 비율
+
+Notebook 변수:
+
+- `result`: wafer-level 결과 Polars DataFrame
+- `analysis_df`: `item_id` 필터와 latest snapshot 필터가 적용되고 `_theta`, `_radius_norm`이 추가된 chip-level Polars DataFrame
