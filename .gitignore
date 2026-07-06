@@ -1,0 +1,11 @@
+__pycache__/
+.ipynb_checkpoints/
+.DS_Store
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+env/
+fourier_y_output.csv
+output.csv
