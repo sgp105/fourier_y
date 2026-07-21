@@ -235,11 +235,27 @@ spoke_fourier_signal = sqrt(E_low / 2)
     * (1 - broadband_energy_ratio)
 ```
 
+spoke 기인 불량률은 추정된 spoke 폭으로 가장 강한 각도 구간을 찾고, 구간 바깥의 평균 불량률을 background로 차감합니다.
+
+```text
+background_rate = outside_defect_chips / outside_chips
+spoke_defect_chip_count_estimate = max(
+    0,
+    sector_defect_chips - background_rate * sector_chips,
+)
+spoke_defect_rate = spoke_defect_chip_count_estimate / total_chip_count
+```
+
 `ANGULAR_BINS = 360`이면 계산 가능한 harmonic은 `1..180`입니다. 기본 low-frequency band는 `1..72`, broadband band는 `90..180`이며 별도의 사용자 입력 없이 자동 설정됩니다. sinc template은 `1..45 degree` 폭에서 가장 잘 맞는 값을 자동 탐색합니다.
 
 ### Spoke Output Columns
 
 - `defect_rate`: 입력한 defect bin의 wafer 전체 chip 비율
+- `spoke_defect_rate`: 검출된 spoke 각도 구간에서 background를 차감한 spoke 기인 추정 불량률
+- `spoke_defect_chip_count_estimate`: spoke에 기인한 것으로 추정되는 background 보정 chip 수
+- `spoke_sector_defect_rate`: 검출된 spoke 각도 구간 내부의 실제 선택-bin 불량률
+- `spoke_background_defect_rate`: spoke 구간 바깥의 선택-bin 평균 불량률
+- `spoke_theta_center_deg`: 검출된 spoke 중심 각도
 - `spoke_fourier_signal`: low-frequency 집중도, sinc 유사도, smoothness와 broadband penalty를 결합한 대표 점수
 - `low_freq_fourier_signal`: low-frequency band의 Fourier energy 크기
 - `low_freq_energy_ratio`: 전체 Fourier energy 중 low-frequency band 비율

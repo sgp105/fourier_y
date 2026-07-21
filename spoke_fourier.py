@@ -393,6 +393,80 @@ def _angular_bin_average(theta: np.ndarray, defect: np.ndarray, *, bin_count: in
     return centers[valid], defect_rate[valid], counts[valid], np.nonzero(valid)[0].astype(np.int64)
 
 
+def _circular_window_sums(values: np.ndarray, window_size: int) -> np.ndarray:
+    if window_size < 1 or window_size > values.size:
+        raise ValueError("window_size must be in 1..len(values).")
+    extended = np.concatenate([values, values[: window_size - 1]])
+    cumulative = np.concatenate([[0.0], np.cumsum(extended, dtype=float)])
+    return cumulative[window_size : window_size + values.size] - cumulative[: values.size]
+
+
+def _estimate_spoke_defect_rate(
+    theta: np.ndarray,
+    defect: np.ndarray,
+    *,
+    angular_bins: int,
+    estimated_width_deg: float,
+) -> dict[str, float | int]:
+    empty = {
+        "spoke_defect_rate": 0.0,
+        "spoke_defect_chip_count_estimate": 0.0,
+        "spoke_sector_defect_rate": float("nan"),
+        "spoke_background_defect_rate": float("nan"),
+        "spoke_sector_chip_count": 0,
+        "spoke_sector_defect_chip_count": 0,
+        "spoke_theta_center_rad": float("nan"),
+        "spoke_theta_center_deg": float("nan"),
+        "spoke_sector_width_deg": float("nan"),
+    }
+    if theta.size == 0 or not np.isfinite(estimated_width_deg) or estimated_width_deg <= 0:
+        return empty
+
+    theta01 = (theta + math.pi) / (2.0 * math.pi)
+    theta_bins = np.floor(theta01 * angular_bins).astype(int) % angular_bins
+    chip_counts = np.bincount(theta_bins, minlength=angular_bins).astype(float)
+    defect_counts = np.bincount(theta_bins, weights=defect, minlength=angular_bins).astype(float)
+    total_chip_count = float(np.sum(chip_counts))
+    total_defect_count = float(np.sum(defect_counts))
+    if total_chip_count <= 0:
+        return empty
+
+    window_size = int(np.clip(round(estimated_width_deg * angular_bins / 360.0), 1, angular_bins - 1))
+    sector_chip_counts = _circular_window_sums(chip_counts, window_size)
+    sector_defect_counts = _circular_window_sums(defect_counts, window_size)
+    outside_chip_counts = total_chip_count - sector_chip_counts
+    outside_defect_counts = total_defect_count - sector_defect_counts
+    background_rates = np.divide(
+        outside_defect_counts,
+        outside_chip_counts,
+        out=np.zeros_like(outside_defect_counts),
+        where=outside_chip_counts > 0,
+    )
+    excess_defect_counts = sector_defect_counts - background_rates * sector_chip_counts
+    best_start = int(np.argmax(excess_defect_counts))
+
+    sector_chip_count = float(sector_chip_counts[best_start])
+    sector_defect_count = float(sector_defect_counts[best_start])
+    background_rate = float(background_rates[best_start])
+    attributed_defect_count = max(0.0, float(excess_defect_counts[best_start]))
+    sector_defect_rate = sector_defect_count / sector_chip_count if sector_chip_count > 0 else float("nan")
+    bin_width_rad = 2.0 * math.pi / angular_bins
+    theta_center = -math.pi + (best_start + window_size / 2.0) * bin_width_rad
+    theta_center = (theta_center + math.pi) % (2.0 * math.pi) - math.pi
+
+    return {
+        "spoke_defect_rate": attributed_defect_count / total_chip_count,
+        "spoke_defect_chip_count_estimate": attributed_defect_count,
+        "spoke_sector_defect_rate": sector_defect_rate,
+        "spoke_background_defect_rate": background_rate,
+        "spoke_sector_chip_count": int(round(sector_chip_count)),
+        "spoke_sector_defect_chip_count": int(round(sector_defect_count)),
+        "spoke_theta_center_rad": float(theta_center),
+        "spoke_theta_center_deg": float(math.degrees(theta_center)),
+        "spoke_sector_width_deg": float(window_size * 360.0 / angular_bins),
+    }
+
+
 def _fourier_amplitudes(theta: np.ndarray, y: np.ndarray, harmonics: list[int]) -> dict[int, float]:
     if y.size == 0:
         return {harmonic: float("nan") for harmonic in harmonics}
@@ -756,6 +830,15 @@ def compute_spoke_signals(
             record["spectral_noise_floor"] = float("nan")
             record["spectral_roughness"] = float("nan")
             record["spectral_smoothness"] = float("nan")
+            record["spoke_defect_rate"] = float("nan")
+            record["spoke_defect_chip_count_estimate"] = float("nan")
+            record["spoke_sector_defect_rate"] = float("nan")
+            record["spoke_background_defect_rate"] = float("nan")
+            record["spoke_sector_chip_count"] = 0
+            record["spoke_sector_defect_chip_count"] = 0
+            record["spoke_theta_center_rad"] = float("nan")
+            record["spoke_theta_center_deg"] = float("nan")
+            record["spoke_sector_width_deg"] = float("nan")
             record["high_freq_fourier_signal"] = float("nan")
             record["peak_high_freq_amplitude"] = float("nan")
             record["peak_harmonic_amplitude"] = float("nan")
@@ -787,6 +870,14 @@ def compute_spoke_signals(
             normalized_sinc_templates=sinc_templates,
         )
         record.update(spectrum_metrics)
+        record.update(
+            _estimate_spoke_defect_rate(
+                theta_all[finite],
+                defect_all[finite],
+                angular_bins=angular_bins,
+                estimated_width_deg=float(spectrum_metrics["estimated_spoke_width_deg"]),
+            )
+        )
         dominant_harmonic = spectrum_metrics["dominant_harmonic"]
         record["dominant_phase_rad"] = (
             _fourier_phase(theta, defect_rate, int(dominant_harmonic))

@@ -72,6 +72,9 @@ class SpokeFourierScoreTests(unittest.TestCase):
         self.assertLess(spoke["broadband_energy_ratio"], ring["broadband_energy_ratio"])
         self.assertGreaterEqual(spoke["estimated_spoke_width_deg"], 7.0)
         self.assertLessEqual(spoke["estimated_spoke_width_deg"], 14.0)
+        self.assertAlmostEqual(spoke["spoke_defect_rate"], spoke["defect_rate"], places=6)
+        self.assertLess(ring["spoke_defect_rate"], ring["defect_rate"] * 0.01)
+        self.assertLessEqual(abs(spoke["spoke_theta_center_deg"]), 3.0)
 
 
 if __name__ == "__main__":
