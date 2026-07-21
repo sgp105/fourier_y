@@ -137,14 +137,14 @@ Notebook 변수:
 
 ### Spoke Input Columns
 
-기본 raw data schema는 아래 5개 칼럼입니다.
+기본 raw data에는 아래 역할을 하는 칼럼이 필요합니다. 실제 파일의 칼럼명이 다르면 notebook의 `Column Mapping`에서 raw 칼럼명을 지정합니다. raw data에 다른 칼럼이 많아도 필요한 칼럼만 projection해서 읽습니다.
 
 ```text
-root_lot_id
-wafer_id
-chip_x_pos
-chip_y_pos
-bin_no
+root lot id
+wafer id
+chip x position
+chip y position
+bin number
 ```
 
 ### Spoke Notebook Usage
@@ -154,6 +154,13 @@ bin_no
 ```python
 INPUT_FILE = Path("input.txt")
 OUTPUT_CSV = Path("spoke_fourier_output.csv")
+
+# Column Mapping: raw file 안의 실제 칼럼명을 지정합니다.
+ROOT_LOT_ID_COL = "root_lot_id"
+WAFER_ID_COL = "wafer_id"
+CHIP_X_COL = "chip_x_pos"
+CHIP_Y_COL = "chip_y_pos"
+BIN_NO_COL = "bin_no"
 
 # list 또는 scalar 모두 허용합니다.
 DEFECT_BIN_NOS = [12]
@@ -168,6 +175,16 @@ MIN_CHIPS = 20
 ```
 
 `DEFECT_BIN_NOS = 12`처럼 scalar로 넣어도 내부에서 단일 원소 list처럼 처리합니다. 입력한 `bin_no` 값만 defect로 보고, 나머지 chip도 wafer를 반지름 1인 원으로 정규화하는 데 사용합니다.
+
+예를 들어 raw file 칼럼명이 `LOT`, `WF`, `X`, `Y`, `BIN`이면 아래처럼 바꾸면 됩니다.
+
+```python
+ROOT_LOT_ID_COL = "LOT"
+WAFER_ID_COL = "WF"
+CHIP_X_COL = "X"
+CHIP_Y_COL = "Y"
+BIN_NO_COL = "BIN"
+```
 
 ### Spoke Calculation
 
@@ -213,6 +230,10 @@ CLI로도 실행할 수 있습니다.
 python3 spoke_fourier.py input.csv \
   --defect-bin-nos 12,13 \
   -o spoke_fourier_output.csv \
+  --group-cols LOT,WF \
+  --x-col X \
+  --y-col Y \
+  --bin-col BIN \
   --angular-bins 360 \
   --high-freq-min-harmonic 8
 ```

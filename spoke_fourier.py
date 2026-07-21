@@ -157,13 +157,29 @@ def _decode_text_bytes(raw: bytes) -> str:
     return raw.decode("utf-8", errors="replace")
 
 
-def _read_plain_csv(path: Path) -> pl.DataFrame:
-    return pl.read_csv(path, has_header=True, separator=",")
+def _projection_columns(raw_columns: Iterable[str], selected: list[str]) -> list[str]:
+    normalized_to_raw = {_normalize_column_name(column): column for column in raw_columns}
+    missing = [column for column in selected if column not in normalized_to_raw]
+    if missing:
+        raise ValueError(f"Input file is missing required columns: {', '.join(missing)}")
+    return [normalized_to_raw[column] for column in selected]
 
 
-def _read_decoded_csv(path: Path) -> pl.DataFrame:
+def _read_plain_csv(path: Path, selected: list[str]) -> pl.DataFrame:
+    header = pl.read_csv(path, has_header=True, separator=",", n_rows=0)
+    if any("\x00" in column for column in header.columns):
+        raise ValueError("NUL-padded column names detected; retrying with decoded text.")
+    projection = _projection_columns(header.columns, selected)
+    df = pl.read_csv(path, has_header=True, separator=",", columns=projection)
+    return df.rename({column: _normalize_column_name(column) for column in df.columns}).select(selected)
+
+
+def _read_decoded_csv(path: Path, selected: list[str]) -> pl.DataFrame:
     text = _decode_text_bytes(path.read_bytes())
-    return pl.read_csv(io.StringIO(text), has_header=True, separator=",")
+    header = pl.read_csv(io.StringIO(text), has_header=True, separator=",", n_rows=0)
+    projection = _projection_columns(header.columns, selected)
+    df = pl.read_csv(io.StringIO(text), has_header=True, separator=",", columns=projection)
+    return df.rename({column: _normalize_column_name(column) for column in df.columns}).select(selected)
 
 
 def read_selected_csv(path: Path, columns: Iterable[str]) -> pl.DataFrame:
@@ -171,12 +187,7 @@ def read_selected_csv(path: Path, columns: Iterable[str]) -> pl.DataFrame:
     errors: list[str] = []
     for reader_name, reader in (("plain", _read_plain_csv), ("decoded", _read_decoded_csv)):
         try:
-            df = reader(path)
-            if reader_name == "plain" and any("\x00" in column for column in df.columns):
-                raise ValueError("NUL-padded column names detected; retrying with decoded text.")
-            df = df.rename({column: _normalize_column_name(column) for column in df.columns})
-            _validate_columns(df, selected)
-            return df.select(selected)
+            return reader(path, selected)
         except Exception as exc:
             errors.append(f"{reader_name}: {exc}")
     raise ValueError(
