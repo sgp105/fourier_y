@@ -167,9 +167,6 @@ BIN_NO_COL = "bin_no"
 # list 또는 scalar 모두 허용합니다.
 DEFECT_BIN_NOS = [12]
 
-# Fourier 결과를 자세히 볼 wafer입니다.
-WAFER_TO_PLOT = ("ABCDE", 10)
-
 ANGULAR_BINS = 360
 HIGH_FREQ_MIN_HARMONIC = 8
 HIGH_FREQ_MAX_HARMONIC = None
@@ -178,7 +175,17 @@ MIN_CHIPS = 20
 
 `DEFECT_BIN_NOS = 12`처럼 scalar로 넣어도 내부에서 단일 원소 list처럼 처리합니다. 입력한 `bin_no` 값만 defect로 보고, 나머지 chip도 wafer를 반지름 1인 원으로 정규화하는 데 사용합니다.
 
-spoke workflow는 선택된 raw 칼럼을 먼저 문자열로 읽은 뒤, 좌표 칼럼만 계산 시점에 숫자로 변환합니다. 따라서 `wafer_id`가 `10` 같은 숫자형이거나 `W01` 같은 문자형이어도 처리할 수 있습니다. 선택 wafer도 문자열 기준으로 비교하므로 `WAFER_TO_PLOT = ("ABCDE", 10)`과 `("ABCDE", "10")`은 같은 wafer를 찾습니다. 파일 값이 `W01`이면 `("ABCDE", "W01")`처럼 입력합니다.
+spoke workflow는 선택된 raw 칼럼을 먼저 문자열로 읽은 뒤, 좌표 칼럼만 계산 시점에 숫자로 변환합니다. 따라서 `wafer_id`가 `10` 같은 숫자형이거나 `W01` 같은 문자형이어도 처리할 수 있습니다.
+
+검증용 wafer는 전체 분석 실행 후 `Selected Wafer Validation` 셀에서 별도로 선택합니다.
+
+```python
+WAFER_TO_PLOT = ("ABCDE", 10)
+```
+
+선택 wafer는 문자열 기준으로 비교하므로 `WAFER_TO_PLOT = ("ABCDE", 10)`과 `("ABCDE", "10")`은 같은 wafer를 찾습니다. 파일 값이 `W01`이면 `("ABCDE", "W01")`처럼 입력합니다.
+
+선택한 wafer 출력에는 전체 chip map도 표시됩니다. `DEFECT_BIN_NOS`에 해당하는 chip은 검은색, 나머지는 흰색이며, 좌표에서 추정한 x/y pitch 크기의 직사각형으로 빈 공간 없이 배치됩니다. 시각화에 사용된 정규화 좌표는 notebook 변수 `wafer_map_df`에 남습니다.
 
 예를 들어 raw file 칼럼명이 `LOT`, `WF`, `X`, `Y`, `BIN`이면 아래처럼 바꾸면 됩니다.
 

@@ -60,6 +60,14 @@ class Geometry:
 
 
 @dataclass(frozen=True)
+class WaferMapData:
+    cells: pl.DataFrame
+    chip_width: float
+    chip_height: float
+    wafer_radius: float
+
+
+@dataclass(frozen=True)
 class SpokeConfig:
     input_path: Path
     defect_bin_nos: object
@@ -477,6 +485,63 @@ def filter_wafer_rows(
 
     available = df.select(group_cols).unique().head(20)
     raise ValueError(f"No rows found for wafer_key={wafer_key!r}. Available examples:\n{available}")
+
+
+def _minimum_positive_step(values: np.ndarray) -> float:
+    unique_values = np.unique(values[np.isfinite(values)])
+    if unique_values.size < 2:
+        return 1.0
+    differences = np.diff(unique_values)
+    positive = differences[differences > np.finfo(float).eps]
+    return float(np.min(positive)) if positive.size else 1.0
+
+
+def build_wafer_map_data(
+    analysis_df: pl.DataFrame,
+    wafer_key: tuple[object, ...],
+    *,
+    group_cols: tuple[str, ...] | list[str] = ("root_lot_id", "wafer_id"),
+    x_col: str = "chip_x_pos",
+    y_col: str = "chip_y_pos",
+) -> WaferMapData:
+    """Return one normalized rectangular cell per chip for wafer-map plotting."""
+
+    group_cols = list(group_cols)
+    _validate_columns(analysis_df, [*group_cols, x_col, y_col, "_is_defect"])
+    wafer_df = filter_wafer_rows(analysis_df, wafer_key, group_cols=group_cols)
+    geometry = _infer_geometry(wafer_df, x_col=x_col, y_col=y_col)
+
+    cells = (
+        wafer_df.select(
+            pl.col(x_col).cast(pl.Float64, strict=False).alias("chip_x"),
+            pl.col(y_col).cast(pl.Float64, strict=False).alias("chip_y"),
+            pl.col("_is_defect").cast(pl.Int8, strict=False).alias("is_defect"),
+        )
+        .filter(pl.col("chip_x").is_finite() & pl.col("chip_y").is_finite())
+        .group_by(["chip_x", "chip_y"], maintain_order=True)
+        .agg(pl.col("is_defect").max())
+        .with_columns(
+            (((pl.col("chip_x") - geometry.center_x) * geometry.pitch_x) / geometry.radius).alias("map_x"),
+            (((pl.col("chip_y") - geometry.center_y) * geometry.pitch_y) / geometry.radius).alias("map_y"),
+        )
+        .select("chip_x", "chip_y", "map_x", "map_y", "is_defect")
+    )
+    if cells.is_empty():
+        raise ValueError(f"No finite chip coordinates found for wafer_key={wafer_key!r}.")
+
+    chip_width = _minimum_positive_step(cells.get_column("chip_x").to_numpy()) * geometry.pitch_x / geometry.radius
+    chip_height = _minimum_positive_step(cells.get_column("chip_y").to_numpy()) * geometry.pitch_y / geometry.radius
+    map_x = cells.get_column("map_x").to_numpy()
+    map_y = cells.get_column("map_y").to_numpy()
+    half_diagonal = 0.5 * math.hypot(chip_width, chip_height)
+    wafer_radius = float(np.max(np.hypot(map_x, map_y)) + half_diagonal)
+
+    return WaferMapData(
+        cells=cells,
+        chip_width=chip_width,
+        chip_height=chip_height,
+        wafer_radius=wafer_radius,
+    )
 
 
 def compute_spoke_signals(
