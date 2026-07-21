@@ -8,4 +8,5 @@ __pycache__/
 venv/
 env/
 fourier_y_output.csv
+spoke_fourier_output.csv
 output.csv
