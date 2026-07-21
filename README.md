@@ -36,7 +36,7 @@ y_value
 last_update_time
 ```
 
-입력 파일은 `.csv` 또는 `.txt`를 사용합니다. 기본은 comma-separated 형식이며, fallback 경로에서는 tab, semicolon, pipe delimiter도 순서대로 시도합니다. UTF-8, CP949/EUC-KR, UTF-16 계열 export를 자동으로 처리합니다.
+입력 파일은 `.csv` 또는 `.txt`를 사용합니다. 기본은 comma-separated 형식이며, tab, semicolon, pipe delimiter도 순서대로 시도합니다. 입력 파일은 bytes를 먼저 디코드한 뒤 필요한 칼럼만 읽으므로 UTF-8, CP949/EUC-KR, UTF-16 계열 export를 자동으로 처리합니다.
 
 행 끝에 delimiter가 추가로 붙어 row별 칼럼 수가 달라지는 경우에는 초과 칼럼을 잘라내고 필요한 칼럼만 읽습니다.
 
@@ -139,7 +139,7 @@ Notebook 변수:
 
 ### Spoke Input Columns
 
-기본 raw data에는 아래 역할을 하는 칼럼이 필요합니다. 실제 파일의 칼럼명이 다르면 notebook의 `Column Mapping`에서 raw 칼럼명을 지정합니다. raw data에 다른 칼럼이 많아도 필요한 칼럼만 projection해서 읽습니다. UTF-8 직접 읽기가 실패하면 bytes를 디코드한 뒤 Python CSV fallback으로 필요한 칼럼만 다시 읽습니다.
+기본 raw data에는 아래 역할을 하는 칼럼이 필요합니다. 실제 파일의 칼럼명이 다르면 notebook의 `Column Mapping`에서 raw 칼럼명을 지정합니다. raw data에 다른 칼럼이 많아도 필요한 칼럼만 projection해서 읽습니다. 입력 파일은 bytes를 먼저 디코드한 뒤 Python CSV parser로 필요한 칼럼만 읽습니다.
 
 ```text
 root lot id

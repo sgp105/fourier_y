@@ -170,18 +170,6 @@ def _projection_columns(raw_columns: Iterable[str], selected: list[str]) -> list
     return [normalized_to_raw[column] for column in selected]
 
 
-def _read_csv_projection(path: Path, selected: list[str], projection: list[str]) -> pl.DataFrame:
-    df = pl.read_csv(
-        path,
-        has_header=True,
-        separator=",",
-        columns=projection,
-        schema_overrides={column: pl.Utf8 for column in projection},
-        truncate_ragged_lines=True,
-    )
-    return df.rename({column: _normalize_column_name(column) for column in df.columns}).select(selected)
-
-
 def _read_decoded_csv_with_separator(text: str, selected: list[str], separator: str) -> pl.DataFrame:
     reader = csv.DictReader(io.StringIO(text), delimiter=separator)
     if reader.fieldnames is None:
@@ -201,14 +189,6 @@ def _read_decoded_csv_with_separator(text: str, selected: list[str], separator: 
     return pl.DataFrame(records, schema=schema).select(selected)
 
 
-def _read_plain_csv(path: Path, selected: list[str]) -> pl.DataFrame:
-    header = pl.read_csv(path, has_header=True, separator=",", n_rows=0, truncate_ragged_lines=True)
-    if any("\x00" in column for column in header.columns):
-        raise ValueError("NUL-padded column names detected; retrying with decoded text.")
-    projection = _projection_columns(header.columns, selected)
-    return _read_csv_projection(path, selected, projection)
-
-
 def _read_decoded_csv(path: Path, selected: list[str]) -> pl.DataFrame:
     text = _decode_text_bytes(path.read_bytes())
     errors: list[str] = []
@@ -226,16 +206,14 @@ def read_selected_csv(path: Path, columns: Iterable[str]) -> pl.DataFrame:
 
     path = Path(path)
     selected = _unique_columns(columns)
-    errors: list[str] = []
-    for reader_name, reader in (("plain", _read_plain_csv), ("decoded", _read_decoded_csv)):
-        try:
-            return reader(path, selected)
-        except Exception as exc:
-            errors.append(f"{reader_name}: {exc}")
+    try:
+        return _read_decoded_csv(path, selected)
+    except Exception as exc:
+        error = str(exc)
 
     raise ValueError(
         "Could not read/select the required delimited text columns. "
-        f"Required columns: {', '.join(selected)}. Attempts: {' | '.join(errors)}"
+        f"Required columns: {', '.join(selected)}. Error: {error}"
     )
 
 
