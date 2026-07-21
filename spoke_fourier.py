@@ -5,7 +5,9 @@ The raw input is expected to have chip-level rows with:
 
     root_lot_id, wafer_id, chip_x_pos, chip_y_pos, bin_no
 
-The requested bin_no value(s) are treated as defect bins. All chip positions,
+The requested bin_no value(s) are treated as defect bins. The selected raw
+columns are read as strings first, so numeric wafer IDs and values such as W01
+can coexist without Polars schema inference failures. All chip positions,
 including non-defect bins, are used to normalize each wafer map to a unit-radius
 disk. The defect indicator is averaged by theta bin, then high-frequency
 Fourier energy is used as the spoke signal score.
@@ -161,8 +163,25 @@ def _projection_columns(raw_columns: Iterable[str], selected: list[str]) -> list
     normalized_to_raw = {_normalize_column_name(column): column for column in raw_columns}
     missing = [column for column in selected if column not in normalized_to_raw]
     if missing:
-        raise ValueError(f"Input file is missing required columns: {', '.join(missing)}")
+        available = ", ".join(normalized_to_raw)
+        raise ValueError(
+            f"Input file is missing required columns: {', '.join(missing)}. "
+            f"Available columns after normalization: {available}"
+        )
     return [normalized_to_raw[column] for column in selected]
+
+
+def _read_csv_projection(source: Path | io.StringIO, selected: list[str], projection: list[str]) -> pl.DataFrame:
+    # Read selected raw columns as strings first. This avoids schema inference
+    # failures when wafer_id/bin_no contains mixed numeric and string values.
+    df = pl.read_csv(
+        source,
+        has_header=True,
+        separator=",",
+        columns=projection,
+        schema_overrides={column: pl.Utf8 for column in projection},
+    )
+    return df.rename({column: _normalize_column_name(column) for column in df.columns}).select(selected)
 
 
 def _read_plain_csv(path: Path, selected: list[str]) -> pl.DataFrame:
@@ -170,19 +189,19 @@ def _read_plain_csv(path: Path, selected: list[str]) -> pl.DataFrame:
     if any("\x00" in column for column in header.columns):
         raise ValueError("NUL-padded column names detected; retrying with decoded text.")
     projection = _projection_columns(header.columns, selected)
-    df = pl.read_csv(path, has_header=True, separator=",", columns=projection)
-    return df.rename({column: _normalize_column_name(column) for column in df.columns}).select(selected)
+    return _read_csv_projection(path, selected, projection)
 
 
 def _read_decoded_csv(path: Path, selected: list[str]) -> pl.DataFrame:
     text = _decode_text_bytes(path.read_bytes())
     header = pl.read_csv(io.StringIO(text), has_header=True, separator=",", n_rows=0)
     projection = _projection_columns(header.columns, selected)
-    df = pl.read_csv(io.StringIO(text), has_header=True, separator=",", columns=projection)
-    return df.rename({column: _normalize_column_name(column) for column in df.columns}).select(selected)
+    return _read_csv_projection(io.StringIO(text), selected, projection)
 
 
 def read_selected_csv(path: Path, columns: Iterable[str]) -> pl.DataFrame:
+    """Read only the requested CSV columns as strings with encoding fallback."""
+
     selected = _unique_columns(columns)
     errors: list[str] = []
     for reader_name, reader in (("plain", _read_plain_csv), ("decoded", _read_decoded_csv)):

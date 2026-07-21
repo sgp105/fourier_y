@@ -176,6 +176,8 @@ MIN_CHIPS = 20
 
 `DEFECT_BIN_NOS = 12`처럼 scalar로 넣어도 내부에서 단일 원소 list처럼 처리합니다. 입력한 `bin_no` 값만 defect로 보고, 나머지 chip도 wafer를 반지름 1인 원으로 정규화하는 데 사용합니다.
 
+spoke workflow는 선택된 raw 칼럼을 먼저 문자열로 읽은 뒤, 좌표 칼럼만 계산 시점에 숫자로 변환합니다. 따라서 `wafer_id`가 `10` 같은 숫자형이거나 `W01` 같은 문자형이어도 처리할 수 있습니다. 선택 wafer도 문자열 기준으로 비교하므로 `WAFER_TO_PLOT = ("ABCDE", 10)`과 `("ABCDE", "10")`은 같은 wafer를 찾습니다. 파일 값이 `W01`이면 `("ABCDE", "W01")`처럼 입력합니다.
+
 예를 들어 raw file 칼럼명이 `LOT`, `WF`, `X`, `Y`, `BIN`이면 아래처럼 바꾸면 됩니다.
 
 ```python
