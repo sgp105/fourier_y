@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Wafer-level annular Fourier y-value extraction.
 
-This module reads chip-level comma-separated text/CSV exports, normalizes each
+This module reads chip-level delimited text/CSV exports, normalizes each
 wafer map to polar coordinates, builds an annular angular y(theta) signal, and
 extracts the requested Fourier harmonic as a wafer-level score.
 """
@@ -9,6 +9,7 @@ extracts the requested Fourier harmonic as a wafer-level score.
 from __future__ import annotations
 
 import argparse
+import csv
 import importlib.util
 import io
 import math
@@ -20,6 +21,7 @@ from typing import Iterable
 
 
 EPSILON = 1e-12
+TEXT_SEPARATORS = (",", "\t", ";", "|")
 CORE_REQUIREMENTS = {
     "numpy": "numpy==1.26.4",
     "polars": "polars==1.14.0",
@@ -156,33 +158,82 @@ def _decode_text_bytes(raw: bytes) -> str:
     return raw.decode("utf-8", errors="replace")
 
 
-def _read_plain_csv(path: Path) -> pl.DataFrame:
-    return pl.read_csv(path, has_header=True, separator=",")
+def _projection_columns(raw_columns: Iterable[str], selected: list[str]) -> list[str]:
+    normalized_to_raw = {_normalize_column_name(column): column for column in raw_columns}
+    missing = [column for column in selected if column not in normalized_to_raw]
+    if missing:
+        available = ", ".join(normalized_to_raw)
+        raise ValueError(
+            f"Input file is missing required columns: {', '.join(missing)}. "
+            f"Available columns after normalization: {available}"
+        )
+    return [normalized_to_raw[column] for column in selected]
 
 
-def _read_decoded_csv(path: Path) -> pl.DataFrame:
+def _read_csv_projection(path: Path, selected: list[str], projection: list[str]) -> pl.DataFrame:
+    df = pl.read_csv(
+        path,
+        has_header=True,
+        separator=",",
+        columns=projection,
+        schema_overrides={column: pl.Utf8 for column in projection},
+    )
+    return df.rename({column: _normalize_column_name(column) for column in df.columns}).select(selected)
+
+
+def _read_decoded_csv_with_separator(text: str, selected: list[str], separator: str) -> pl.DataFrame:
+    reader = csv.DictReader(io.StringIO(text), delimiter=separator)
+    if reader.fieldnames is None:
+        raise ValueError("Input file has no header row.")
+
+    projection = _projection_columns(reader.fieldnames, selected)
+    raw_to_selected = {raw_column: _normalize_column_name(raw_column) for raw_column in projection}
+    records: list[dict[str, str | None]] = []
+    for row in reader:
+        record = {selected_column: row.get(raw_column) for raw_column, selected_column in raw_to_selected.items()}
+        if any(value not in (None, "") for value in record.values()):
+            records.append(record)
+
+    schema = {column: pl.Utf8 for column in selected}
+    if not records:
+        return pl.DataFrame(schema=schema)
+    return pl.DataFrame(records, schema=schema).select(selected)
+
+
+def _read_plain_csv(path: Path, selected: list[str]) -> pl.DataFrame:
+    header = pl.read_csv(path, has_header=True, separator=",", n_rows=0)
+    if any("\x00" in column for column in header.columns):
+        raise ValueError("NUL-padded column names detected; retrying with decoded text.")
+    projection = _projection_columns(header.columns, selected)
+    return _read_csv_projection(path, selected, projection)
+
+
+def _read_decoded_csv(path: Path, selected: list[str]) -> pl.DataFrame:
     text = _decode_text_bytes(path.read_bytes())
-    return pl.read_csv(io.StringIO(text), has_header=True, separator=",")
+    errors: list[str] = []
+    for separator in TEXT_SEPARATORS:
+        try:
+            return _read_decoded_csv_with_separator(text, selected, separator)
+        except Exception as exc:
+            label = "\\t" if separator == "\t" else separator
+            errors.append(f"separator={label!r}: {exc}")
+    raise ValueError("Decoded text could not be parsed with supported separators. " + " | ".join(errors))
 
 
 def read_selected_csv(path: Path, columns: Iterable[str]) -> pl.DataFrame:
-    """Read comma-separated .txt/.csv and keep only selected columns."""
+    """Read delimited .txt/.csv and keep only selected columns."""
 
+    path = Path(path)
     selected = _unique_columns(columns)
     errors: list[str] = []
     for reader_name, reader in (("plain", _read_plain_csv), ("decoded", _read_decoded_csv)):
         try:
-            df = reader(path)
-            if reader_name == "plain" and any("\x00" in column for column in df.columns):
-                raise ValueError("NUL-padded column names detected; retrying with decoded text.")
-            df = df.rename({column: _normalize_column_name(column) for column in df.columns})
-            _validate_columns(df, selected)
-            return df.select(selected)
+            return reader(path, selected)
         except Exception as exc:
             errors.append(f"{reader_name}: {exc}")
 
     raise ValueError(
-        "Could not read/select the required comma-separated columns with Polars. "
+        "Could not read/select the required delimited text columns. "
         f"Required columns: {', '.join(selected)}. Attempts: {' | '.join(errors)}"
     )
 

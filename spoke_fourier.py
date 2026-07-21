@@ -16,6 +16,7 @@ Fourier energy is used as the spoke signal score.
 from __future__ import annotations
 
 import argparse
+import csv
 import importlib.util
 import io
 import math
@@ -27,6 +28,7 @@ from typing import Iterable
 
 
 EPSILON = 1e-12
+TEXT_SEPARATORS = (",", "\t", ";", "|")
 CORE_REQUIREMENTS = {
     "numpy": "numpy==1.26.4",
     "polars": "polars==1.14.0",
@@ -184,6 +186,25 @@ def _read_csv_projection(source: Path | io.StringIO, selected: list[str], projec
     return df.rename({column: _normalize_column_name(column) for column in df.columns}).select(selected)
 
 
+def _read_decoded_csv_with_separator(text: str, selected: list[str], separator: str) -> pl.DataFrame:
+    reader = csv.DictReader(io.StringIO(text), delimiter=separator)
+    if reader.fieldnames is None:
+        raise ValueError("Input file has no header row.")
+
+    projection = _projection_columns(reader.fieldnames, selected)
+    raw_to_selected = {raw_column: _normalize_column_name(raw_column) for raw_column in projection}
+    records: list[dict[str, str | None]] = []
+    for row in reader:
+        record = {selected_column: row.get(raw_column) for raw_column, selected_column in raw_to_selected.items()}
+        if any(value not in (None, "") for value in record.values()):
+            records.append(record)
+
+    schema = {column: pl.Utf8 for column in selected}
+    if not records:
+        return pl.DataFrame(schema=schema)
+    return pl.DataFrame(records, schema=schema).select(selected)
+
+
 def _read_plain_csv(path: Path, selected: list[str]) -> pl.DataFrame:
     header = pl.read_csv(path, has_header=True, separator=",", n_rows=0)
     if any("\x00" in column for column in header.columns):
@@ -194,14 +215,20 @@ def _read_plain_csv(path: Path, selected: list[str]) -> pl.DataFrame:
 
 def _read_decoded_csv(path: Path, selected: list[str]) -> pl.DataFrame:
     text = _decode_text_bytes(path.read_bytes())
-    header = pl.read_csv(io.StringIO(text), has_header=True, separator=",", n_rows=0)
-    projection = _projection_columns(header.columns, selected)
-    return _read_csv_projection(io.StringIO(text), selected, projection)
+    errors: list[str] = []
+    for separator in TEXT_SEPARATORS:
+        try:
+            return _read_decoded_csv_with_separator(text, selected, separator)
+        except Exception as exc:
+            label = "\\t" if separator == "\t" else separator
+            errors.append(f"separator={label!r}: {exc}")
+    raise ValueError("Decoded text could not be parsed with supported separators. " + " | ".join(errors))
 
 
 def read_selected_csv(path: Path, columns: Iterable[str]) -> pl.DataFrame:
     """Read only the requested CSV columns as strings with encoding fallback."""
 
+    path = Path(path)
     selected = _unique_columns(columns)
     errors: list[str] = []
     for reader_name, reader in (("plain", _read_plain_csv), ("decoded", _read_decoded_csv)):
@@ -210,7 +237,7 @@ def read_selected_csv(path: Path, columns: Iterable[str]) -> pl.DataFrame:
         except Exception as exc:
             errors.append(f"{reader_name}: {exc}")
     raise ValueError(
-        "Could not read/select the required comma-separated columns with Polars. "
+        "Could not read/select the required delimited text columns. "
         f"Required columns: {', '.join(selected)}. Attempts: {' | '.join(errors)}"
     )
 
