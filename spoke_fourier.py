@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-"""Wafer-level spoke defect Fourier analysis.
+"""Wafer-level spoke fail Fourier analysis.
 
 The raw input is expected to have chip-level rows with:
 
     root_lot_id, wafer_id, chip_x_pos, chip_y_pos, bin_no
 
-The requested bin_no value(s) are treated as defect bins. The selected raw
+The requested bin_no value(s) are treated as fail bins. The selected raw
 columns are read as strings first, so numeric wafer IDs and values such as W01
 can coexist without Polars schema inference failures. All chip positions,
-including non-defect bins, are used to normalize each wafer map to a unit-radius
-disk. The defect indicator is averaged by theta bin. The spoke score rewards
+including non-fail bins, are used to normalize each wafer map to a unit-radius
+disk. The fail indicator is averaged by theta bin. The spoke score rewards
 low-frequency energy concentration and similarity to the sinc-shaped spectrum
 of a localized angular pulse, while penalizing rough broadband energy.
 """
@@ -71,7 +71,7 @@ class WaferMapData:
 @dataclass(frozen=True)
 class SpokeConfig:
     input_path: Path
-    defect_bin_nos: object
+    fail_bin_nos: object
     output_csv: Path = Path("spoke_fourier_output.csv")
     angular_bins: int = 360
     low_freq_max_harmonic: int | None = None
@@ -90,9 +90,10 @@ class SpokeConfig:
 @dataclass(frozen=True)
 class SpokeRun:
     result: pl.DataFrame
+    diagnostics: pl.DataFrame
     analysis_df: pl.DataFrame
     geometries: dict[object, Geometry]
-    defect_bin_nos: tuple[str, ...]
+    fail_bin_nos: tuple[str, ...]
 
 
 def _split_columns(value: str | None) -> tuple[str, ...]:
@@ -105,7 +106,7 @@ def normalize_bin_no_list(value: object) -> tuple[str, ...]:
     """Normalize scalar/list bin_no input to a tuple of string values."""
 
     if value is None:
-        raise ValueError("At least one defect bin_no must be provided.")
+        raise ValueError("At least one fail bin_no must be provided.")
     if isinstance(value, str):
         parts = [part.strip() for part in value.split(",") if part.strip()]
     elif isinstance(value, Iterable):
@@ -113,7 +114,7 @@ def normalize_bin_no_list(value: object) -> tuple[str, ...]:
     else:
         parts = [str(value).strip()]
     if not parts:
-        raise ValueError("At least one defect bin_no must be provided.")
+        raise ValueError("At least one fail bin_no must be provided.")
     return tuple(dict.fromkeys(parts))
 
 
@@ -128,6 +129,8 @@ def _validate_columns(df: pl.DataFrame, columns: Iterable[str]) -> None:
 
 
 def _validate_config(config: SpokeConfig) -> None:
+    if len(config.group_cols) != 2:
+        raise ValueError("group_cols must contain root lot and wafer columns in that order.")
     if config.angular_bins < 4:
         raise ValueError("angular_bins must be >= 4.")
     max_harmonic = max_calculable_harmonic(config.angular_bins)
@@ -329,15 +332,15 @@ def attach_polar_coordinates(
     return pl.concat(parts, how="vertical_relaxed"), geometries
 
 
-def attach_defect_indicator(df: pl.DataFrame, *, bin_col: str, defect_bin_nos: tuple[str, ...]) -> pl.DataFrame:
+def attach_fail_indicator(df: pl.DataFrame, *, bin_col: str, fail_bin_nos: tuple[str, ...]) -> pl.DataFrame:
     _validate_columns(df, [bin_col])
     return df.with_columns(
         pl.col(bin_col)
         .cast(pl.Utf8, strict=False)
         .str.strip_chars()
-        .is_in(list(defect_bin_nos))
+        .is_in(list(fail_bin_nos))
         .cast(pl.Int8)
-        .alias("_is_defect")
+        .alias("_is_fail")
     )
 
 
@@ -382,15 +385,15 @@ def high_frequency_harmonics(
     return list(range(min_harmonic, resolved_max + 1))
 
 
-def _angular_bin_average(theta: np.ndarray, defect: np.ndarray, *, bin_count: int) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+def _angular_bin_average(theta: np.ndarray, fail: np.ndarray, *, bin_count: int) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     theta01 = (theta + math.pi) / (2.0 * math.pi)
     bins = np.floor(theta01 * bin_count).astype(int) % bin_count
     counts = np.bincount(bins, minlength=bin_count).astype(float)
-    sums = np.bincount(bins, weights=defect, minlength=bin_count).astype(float)
+    sums = np.bincount(bins, weights=fail, minlength=bin_count).astype(float)
     valid = counts > 0
     centers = -math.pi + (np.arange(bin_count, dtype=float) + 0.5) * (2.0 * math.pi / bin_count)
-    defect_rate = np.divide(sums, counts, out=np.zeros_like(sums), where=valid)
-    return centers[valid], defect_rate[valid], counts[valid], np.nonzero(valid)[0].astype(np.int64)
+    fail_rate = np.divide(sums, counts, out=np.zeros_like(sums), where=valid)
+    return centers[valid], fail_rate[valid], counts[valid], np.nonzero(valid)[0].astype(np.int64)
 
 
 def _circular_window_sums(values: np.ndarray, window_size: int) -> np.ndarray:
@@ -401,20 +404,20 @@ def _circular_window_sums(values: np.ndarray, window_size: int) -> np.ndarray:
     return cumulative[window_size : window_size + values.size] - cumulative[: values.size]
 
 
-def _estimate_spoke_defect_rate(
+def _estimate_spoke_fail_rate(
     theta: np.ndarray,
-    defect: np.ndarray,
+    fail: np.ndarray,
     *,
     angular_bins: int,
     estimated_width_deg: float,
 ) -> dict[str, float | int]:
     empty = {
-        "spoke_defect_rate": 0.0,
-        "spoke_defect_chip_count_estimate": 0.0,
-        "spoke_sector_defect_rate": float("nan"),
-        "spoke_background_defect_rate": float("nan"),
+        "spoke_fail_rate": 0.0,
+        "spoke_fail_chip_count_estimate": 0.0,
+        "spoke_sector_fail_rate": float("nan"),
+        "spoke_background_fail_rate": float("nan"),
         "spoke_sector_chip_count": 0,
-        "spoke_sector_defect_chip_count": 0,
+        "spoke_sector_fail_chip_count": 0,
         "spoke_theta_center_rad": float("nan"),
         "spoke_theta_center_deg": float("nan"),
         "spoke_sector_width_deg": float("nan"),
@@ -425,42 +428,42 @@ def _estimate_spoke_defect_rate(
     theta01 = (theta + math.pi) / (2.0 * math.pi)
     theta_bins = np.floor(theta01 * angular_bins).astype(int) % angular_bins
     chip_counts = np.bincount(theta_bins, minlength=angular_bins).astype(float)
-    defect_counts = np.bincount(theta_bins, weights=defect, minlength=angular_bins).astype(float)
+    fail_counts = np.bincount(theta_bins, weights=fail, minlength=angular_bins).astype(float)
     total_chip_count = float(np.sum(chip_counts))
-    total_defect_count = float(np.sum(defect_counts))
+    total_fail_count = float(np.sum(fail_counts))
     if total_chip_count <= 0:
         return empty
 
     window_size = int(np.clip(round(estimated_width_deg * angular_bins / 360.0), 1, angular_bins - 1))
     sector_chip_counts = _circular_window_sums(chip_counts, window_size)
-    sector_defect_counts = _circular_window_sums(defect_counts, window_size)
+    sector_fail_counts = _circular_window_sums(fail_counts, window_size)
     outside_chip_counts = total_chip_count - sector_chip_counts
-    outside_defect_counts = total_defect_count - sector_defect_counts
+    outside_fail_counts = total_fail_count - sector_fail_counts
     background_rates = np.divide(
-        outside_defect_counts,
+        outside_fail_counts,
         outside_chip_counts,
-        out=np.zeros_like(outside_defect_counts),
+        out=np.zeros_like(outside_fail_counts),
         where=outside_chip_counts > 0,
     )
-    excess_defect_counts = sector_defect_counts - background_rates * sector_chip_counts
-    best_start = int(np.argmax(excess_defect_counts))
+    excess_fail_counts = sector_fail_counts - background_rates * sector_chip_counts
+    best_start = int(np.argmax(excess_fail_counts))
 
     sector_chip_count = float(sector_chip_counts[best_start])
-    sector_defect_count = float(sector_defect_counts[best_start])
+    sector_fail_count = float(sector_fail_counts[best_start])
     background_rate = float(background_rates[best_start])
-    attributed_defect_count = max(0.0, float(excess_defect_counts[best_start]))
-    sector_defect_rate = sector_defect_count / sector_chip_count if sector_chip_count > 0 else float("nan")
+    attributed_fail_count = max(0.0, float(excess_fail_counts[best_start]))
+    sector_fail_rate = sector_fail_count / sector_chip_count if sector_chip_count > 0 else float("nan")
     bin_width_rad = 2.0 * math.pi / angular_bins
     theta_center = -math.pi + (best_start + window_size / 2.0) * bin_width_rad
     theta_center = (theta_center + math.pi) % (2.0 * math.pi) - math.pi
 
     return {
-        "spoke_defect_rate": attributed_defect_count / total_chip_count,
-        "spoke_defect_chip_count_estimate": attributed_defect_count,
-        "spoke_sector_defect_rate": sector_defect_rate,
-        "spoke_background_defect_rate": background_rate,
+        "spoke_fail_rate": attributed_fail_count / total_chip_count,
+        "spoke_fail_chip_count_estimate": attributed_fail_count,
+        "spoke_sector_fail_rate": sector_fail_rate,
+        "spoke_background_fail_rate": background_rate,
         "spoke_sector_chip_count": int(round(sector_chip_count)),
-        "spoke_sector_defect_chip_count": int(round(sector_defect_count)),
+        "spoke_sector_fail_chip_count": int(round(sector_fail_count)),
         "spoke_theta_center_rad": float(theta_center),
         "spoke_theta_center_deg": float(math.degrees(theta_center)),
         "spoke_sector_width_deg": float(window_size * 360.0 / angular_bins),
@@ -604,39 +607,39 @@ def build_wafer_theta_signal(
     group_cols: tuple[str, ...] | list[str] = ("root_lot_id", "wafer_id"),
     angular_bins: int = 360,
 ) -> pl.DataFrame:
-    """Return theta-bin defect rate for one wafer."""
+    """Return theta-bin fail rate for one wafer."""
 
     group_cols = list(group_cols)
-    _validate_columns(analysis_df, [*group_cols, "_theta", "_is_defect"])
+    _validate_columns(analysis_df, [*group_cols, "_theta", "_is_fail"])
     wafer_df = filter_wafer_rows(analysis_df, wafer_key, group_cols=group_cols)
     numeric = wafer_df.select(
         pl.col("_theta").cast(pl.Float64, strict=False),
-        pl.col("_is_defect").cast(pl.Float64, strict=False),
+        pl.col("_is_fail").cast(pl.Float64, strict=False),
     )
     theta_all = numeric.get_column("_theta").to_numpy()
-    defect_all = numeric.get_column("_is_defect").to_numpy()
-    finite = np.isfinite(theta_all) & np.isfinite(defect_all)
+    fail_all = numeric.get_column("_is_fail").to_numpy()
+    finite = np.isfinite(theta_all) & np.isfinite(fail_all)
 
     if not np.any(finite):
         return pl.DataFrame(
             schema={
                 "theta_bin": pl.Int64,
                 "theta_rad": pl.Float64,
-                "defect_rate": pl.Float64,
+                "fail_rate": pl.Float64,
                 "chip_count": pl.Int64,
             }
         )
 
-    theta, defect_rate, chip_count, theta_bin = _angular_bin_average(
+    theta, fail_rate, chip_count, theta_bin = _angular_bin_average(
         theta_all[finite],
-        defect_all[finite],
+        fail_all[finite],
         bin_count=angular_bins,
     )
     return pl.DataFrame(
         {
             "theta_bin": theta_bin,
             "theta_rad": theta,
-            "defect_rate": defect_rate,
+            "fail_rate": fail_rate,
             "chip_count": chip_count.astype(np.int64),
         }
     )
@@ -648,7 +651,7 @@ def compute_harmonic_spectrum(
     angular_bins: int = 360,
     max_harmonic: int | None = None,
     theta_col: str = "theta_rad",
-    value_col: str = "defect_rate",
+    value_col: str = "fail_rate",
 ) -> pl.DataFrame:
     """Compute harmonic amplitudes for one theta signal."""
 
@@ -718,7 +721,7 @@ def build_wafer_map_data(
     """Return one normalized rectangular cell per chip for wafer-map plotting."""
 
     group_cols = list(group_cols)
-    _validate_columns(analysis_df, [*group_cols, x_col, y_col, "_is_defect"])
+    _validate_columns(analysis_df, [*group_cols, x_col, y_col, "_is_fail"])
     wafer_df = filter_wafer_rows(analysis_df, wafer_key, group_cols=group_cols)
     geometry = _infer_geometry(wafer_df, x_col=x_col, y_col=y_col)
 
@@ -726,16 +729,16 @@ def build_wafer_map_data(
         wafer_df.select(
             pl.col(x_col).cast(pl.Float64, strict=False).alias("chip_x"),
             pl.col(y_col).cast(pl.Float64, strict=False).alias("chip_y"),
-            pl.col("_is_defect").cast(pl.Int8, strict=False).alias("is_defect"),
+            pl.col("_is_fail").cast(pl.Int8, strict=False).alias("is_fail"),
         )
         .filter(pl.col("chip_x").is_finite() & pl.col("chip_y").is_finite())
         .group_by(["chip_x", "chip_y"], maintain_order=True)
-        .agg(pl.col("is_defect").max())
+        .agg(pl.col("is_fail").max())
         .with_columns(
             (((pl.col("chip_x") - geometry.center_x) * geometry.pitch_x) / geometry.radius).alias("map_x"),
             (((pl.col("chip_y") - geometry.center_y) * geometry.pitch_y) / geometry.radius).alias("map_y"),
         )
-        .select("chip_x", "chip_y", "map_x", "map_y", "is_defect")
+        .select("chip_x", "chip_y", "map_x", "map_y", "is_fail")
     )
     if cells.is_empty():
         raise ValueError(f"No finite chip coordinates found for wafer_key={wafer_key!r}.")
@@ -767,7 +770,7 @@ def compute_spoke_signals(
     sinc_width_step_deg: float = 0.5,
     min_chips: int = 20,
 ) -> pl.DataFrame:
-    _validate_columns(analysis_df, [*group_cols, "_theta", "_is_defect"])
+    _validate_columns(analysis_df, [*group_cols, "_theta", "_is_fail"])
     if sinc_width_min_deg <= 0 or sinc_width_max_deg < sinc_width_min_deg or sinc_width_max_deg >= 360:
         raise ValueError("sinc template widths must satisfy 0 < min <= max < 360 degrees.")
     if sinc_width_step_deg <= 0:
@@ -795,17 +798,17 @@ def compute_spoke_signals(
         record: dict[str, object] = dict(zip(group_cols, _key_values(key, group_cols)))
         numeric = group.select(
             pl.col("_theta").cast(pl.Float64, strict=False),
-            pl.col("_is_defect").cast(pl.Float64, strict=False),
+            pl.col("_is_fail").cast(pl.Float64, strict=False),
         )
         theta_all = numeric.get_column("_theta").to_numpy()
-        defect_all = numeric.get_column("_is_defect").to_numpy()
-        finite = np.isfinite(theta_all) & np.isfinite(defect_all)
+        fail_all = numeric.get_column("_is_fail").to_numpy()
+        finite = np.isfinite(theta_all) & np.isfinite(fail_all)
         total_chip_count = int(np.count_nonzero(finite))
-        defect_chip_count = int(np.sum(defect_all[finite])) if total_chip_count else 0
+        fail_chip_count = int(np.sum(fail_all[finite])) if total_chip_count else 0
 
         record["total_chip_count"] = total_chip_count
-        record["defect_chip_count"] = defect_chip_count
-        record["defect_rate"] = float(defect_chip_count / total_chip_count) if total_chip_count else 0.0
+        record["fail_chip_count"] = fail_chip_count
+        record["fail_rate"] = float(fail_chip_count / total_chip_count) if total_chip_count else 0.0
         record["angular_bins"] = angular_bins
         record["max_calculable_harmonic"] = max_harmonic
         record["low_freq_max_harmonic"] = low_freq_max
@@ -817,8 +820,8 @@ def compute_spoke_signals(
         if total_chip_count < min_chips:
             record["theta_bins_with_chips"] = 0
             record["theta_coverage"] = 0.0
-            record["mean_theta_defect_rate"] = float("nan")
-            record["std_theta_defect_rate"] = float("nan")
+            record["mean_theta_fail_rate"] = float("nan")
+            record["std_theta_fail_rate"] = float("nan")
             record["spoke_fourier_signal"] = float("nan")
             record["low_freq_fourier_signal"] = float("nan")
             record["broadband_fourier_signal"] = float("nan")
@@ -830,12 +833,12 @@ def compute_spoke_signals(
             record["spectral_noise_floor"] = float("nan")
             record["spectral_roughness"] = float("nan")
             record["spectral_smoothness"] = float("nan")
-            record["spoke_defect_rate"] = float("nan")
-            record["spoke_defect_chip_count_estimate"] = float("nan")
-            record["spoke_sector_defect_rate"] = float("nan")
-            record["spoke_background_defect_rate"] = float("nan")
+            record["spoke_fail_rate"] = float("nan")
+            record["spoke_fail_chip_count_estimate"] = float("nan")
+            record["spoke_sector_fail_rate"] = float("nan")
+            record["spoke_background_fail_rate"] = float("nan")
             record["spoke_sector_chip_count"] = 0
-            record["spoke_sector_defect_chip_count"] = 0
+            record["spoke_sector_fail_chip_count"] = 0
             record["spoke_theta_center_rad"] = float("nan")
             record["spoke_theta_center_deg"] = float("nan")
             record["spoke_sector_width_deg"] = float("nan")
@@ -849,17 +852,17 @@ def compute_spoke_signals(
             records.append(record)
             continue
 
-        theta, defect_rate, chip_count, _ = _angular_bin_average(
+        theta, fail_rate, chip_count, _ = _angular_bin_average(
             theta_all[finite],
-            defect_all[finite],
+            fail_all[finite],
             bin_count=angular_bins,
         )
         record["theta_bins_with_chips"] = int(chip_count.size)
         record["theta_coverage"] = float(chip_count.size / angular_bins)
-        record["mean_theta_defect_rate"] = float(np.mean(defect_rate)) if defect_rate.size else float("nan")
-        record["std_theta_defect_rate"] = float(np.std(defect_rate)) if defect_rate.size else float("nan")
+        record["mean_theta_fail_rate"] = float(np.mean(fail_rate)) if fail_rate.size else float("nan")
+        record["std_theta_fail_rate"] = float(np.std(fail_rate)) if fail_rate.size else float("nan")
 
-        amplitude_map = _fourier_amplitudes(theta, defect_rate, harmonic_list)
+        amplitude_map = _fourier_amplitudes(theta, fail_rate, harmonic_list)
         amplitude_values = np.array([amplitude_map[harmonic] for harmonic in harmonic_list], dtype=float)
         spectrum_metrics = _score_spoke_spectrum(
             harmonics,
@@ -871,16 +874,16 @@ def compute_spoke_signals(
         )
         record.update(spectrum_metrics)
         record.update(
-            _estimate_spoke_defect_rate(
+            _estimate_spoke_fail_rate(
                 theta_all[finite],
-                defect_all[finite],
+                fail_all[finite],
                 angular_bins=angular_bins,
                 estimated_width_deg=float(spectrum_metrics["estimated_spoke_width_deg"]),
             )
         )
         dominant_harmonic = spectrum_metrics["dominant_harmonic"]
         record["dominant_phase_rad"] = (
-            _fourier_phase(theta, defect_rate, int(dominant_harmonic))
+            _fourier_phase(theta, fail_rate, int(dominant_harmonic))
             if dominant_harmonic is not None
             else float("nan")
         )
@@ -891,19 +894,19 @@ def compute_spoke_signals(
 
 def run_spoke_fourier(config: SpokeConfig, *, write_csv: bool = True) -> SpokeRun:
     _validate_config(config)
-    defect_bin_nos = normalize_bin_no_list(config.defect_bin_nos)
+    fail_bin_nos = normalize_bin_no_list(config.fail_bin_nos)
     group_cols = list(config.group_cols)
     requested_columns = _unique_columns([*group_cols, config.x_col, config.y_col, config.bin_col])
 
     df = read_selected_csv(Path(config.input_path), requested_columns)
-    df = attach_defect_indicator(df, bin_col=config.bin_col, defect_bin_nos=defect_bin_nos)
+    df = attach_fail_indicator(df, bin_col=config.bin_col, fail_bin_nos=fail_bin_nos)
     analysis_df, geometries = attach_polar_coordinates(
         df,
         group_cols=group_cols,
         x_col=config.x_col,
         y_col=config.y_col,
     )
-    result = compute_spoke_signals(
+    diagnostics = compute_spoke_signals(
         analysis_df,
         group_cols=group_cols,
         angular_bins=config.angular_bins,
@@ -914,18 +917,30 @@ def run_spoke_fourier(config: SpokeConfig, *, write_csv: bool = True) -> SpokeRu
         sinc_width_step_deg=config.sinc_width_step_deg,
         min_chips=config.min_chips,
     )
-    if config.sort_by_score and result.height and "spoke_fourier_signal" in result.columns:
-        result = result.sort("spoke_fourier_signal", descending=True, nulls_last=True)
+    if config.sort_by_score and diagnostics.height and "spoke_fourier_signal" in diagnostics.columns:
+        diagnostics = diagnostics.sort("spoke_fourier_signal", descending=True, nulls_last=True)
+    result = diagnostics.select(
+        pl.col(group_cols[0]).alias("root_lot_id"),
+        pl.col(group_cols[1]).alias("wafer_id"),
+        pl.col("spoke_fail_rate"),
+        pl.col("estimated_spoke_width_deg"),
+    )
     if write_csv:
         config.output_csv.parent.mkdir(parents=True, exist_ok=True)
         result.write_csv(config.output_csv)
-    return SpokeRun(result=result, analysis_df=analysis_df, geometries=geometries, defect_bin_nos=defect_bin_nos)
+    return SpokeRun(
+        result=result,
+        diagnostics=diagnostics,
+        analysis_df=analysis_df,
+        geometries=geometries,
+        fail_bin_nos=fail_bin_nos,
+    )
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Compute low-frequency coherent spoke Fourier signals from bin_no wafer maps.")
     parser.add_argument("input_csv", type=Path, help="Input chip-level .txt or .csv path. Comma and tab delimiters are both tried.")
-    parser.add_argument("--defect-bin-nos", required=True, help="Comma-separated bin_no values treated as defects.")
+    parser.add_argument("--fail-bin-nos", required=True, help="Comma-separated bin_no values treated as fails.")
     parser.add_argument("-o", "--output-csv", type=Path, default=Path("spoke_fourier_output.csv"))
     parser.add_argument("--angular-bins", type=int, default=360)
     parser.add_argument("--low-freq-max-harmonic", type=int, default=None)
@@ -945,7 +960,7 @@ def main() -> None:
     args = build_arg_parser().parse_args()
     config = SpokeConfig(
         input_path=args.input_csv,
-        defect_bin_nos=_split_columns(args.defect_bin_nos),
+        fail_bin_nos=_split_columns(args.fail_bin_nos),
         output_csv=args.output_csv,
         angular_bins=args.angular_bins,
         low_freq_max_harmonic=args.low_freq_max_harmonic,

@@ -166,13 +166,13 @@ CHIP_Y_COL = "chip_y_pos"
 BIN_NO_COL = "bin_no"
 
 # list 또는 scalar 모두 허용합니다.
-DEFECT_BIN_NOS = [12]
+FAIL_BIN_NOS = [12]
 
 ANGULAR_BINS = 360
 MIN_CHIPS = 20
 ```
 
-`DEFECT_BIN_NOS = 12`처럼 scalar로 넣어도 내부에서 단일 원소 list처럼 처리합니다. 입력한 `bin_no` 값만 defect로 보고, 나머지 chip도 wafer를 반지름 1인 원으로 정규화하는 데 사용합니다.
+`FAIL_BIN_NOS = 12`처럼 scalar로 넣어도 내부에서 단일 원소 list처럼 처리합니다. 입력한 `bin_no` 값만 fail로 보고, 나머지 chip도 wafer를 반지름 1인 원으로 정규화하는 데 사용합니다.
 
 spoke workflow는 선택된 raw 칼럼을 먼저 문자열로 읽은 뒤, 좌표 칼럼만 계산 시점에 숫자로 변환합니다. 따라서 `wafer_id`가 `10` 같은 숫자형이거나 `W01` 같은 문자형이어도 처리할 수 있습니다.
 
@@ -184,7 +184,7 @@ WAFER_TO_PLOT = ("ABCDE", 10)
 
 선택 wafer는 문자열 기준으로 비교하므로 `WAFER_TO_PLOT = ("ABCDE", 10)`과 `("ABCDE", "10")`은 같은 wafer를 찾습니다. 파일 값이 `W01`이면 `("ABCDE", "W01")`처럼 입력합니다.
 
-선택한 wafer 출력에는 전체 chip map도 표시됩니다. `DEFECT_BIN_NOS`에 해당하는 chip은 검은색, 나머지는 흰색이며, 좌표에서 추정한 x/y pitch 크기의 직사각형으로 빈 공간 없이 배치됩니다. 시각화에 사용된 정규화 좌표는 notebook 변수 `wafer_map_df`에 남습니다.
+선택한 wafer 출력에는 전체 chip map도 표시됩니다. `FAIL_BIN_NOS`에 해당하는 chip은 검은색, 나머지는 흰색이며, 좌표에서 추정한 x/y pitch 크기의 직사각형으로 빈 공간 없이 배치됩니다. 시각화에 사용된 정규화 좌표는 notebook 변수 `wafer_map_df`에 남습니다.
 
 예를 들어 raw file 칼럼명이 `LOT`, `WF`, `X`, `Y`, `BIN`이면 아래처럼 바꾸면 됩니다.
 
@@ -198,13 +198,13 @@ BIN_NO_COL = "BIN"
 
 ### Spoke Calculation
 
-입력한 defect bin set을 `B`라고 하면 chip별 defect indicator는 아래와 같습니다.
+입력한 fail bin set을 `B`라고 하면 chip별 fail indicator는 아래와 같습니다.
 
 ```text
 d_i = 1(bin_no_i in B)
 ```
 
-모든 반경 영역을 사용하고 theta 방향을 360개 bin으로 나눠 angular defect-rate signal을 만듭니다.
+모든 반경 영역을 사용하고 theta 방향을 360개 bin으로 나눠 angular fail-rate signal을 만듭니다.
 
 ```text
 p(theta_j) = mean(d_i | theta_i in bin_j)
@@ -238,41 +238,30 @@ spoke_fourier_signal = sqrt(E_low / 2)
 spoke 기인 불량률은 추정된 spoke 폭으로 가장 강한 각도 구간을 찾고, 구간 바깥의 평균 불량률을 background로 차감합니다.
 
 ```text
-background_rate = outside_defect_chips / outside_chips
-spoke_defect_chip_count_estimate = max(
+background_rate = outside_fail_chips / outside_chips
+spoke_fail_chip_count_estimate = max(
     0,
-    sector_defect_chips - background_rate * sector_chips,
+    sector_fail_chips - background_rate * sector_chips,
 )
-spoke_defect_rate = spoke_defect_chip_count_estimate / total_chip_count
+spoke_fail_rate = spoke_fail_chip_count_estimate / total_chip_count
 ```
 
 `ANGULAR_BINS = 360`이면 계산 가능한 harmonic은 `1..180`입니다. 기본 low-frequency band는 `1..72`, broadband band는 `90..180`이며 별도의 사용자 입력 없이 자동 설정됩니다. sinc template은 `1..45 degree` 폭에서 가장 잘 맞는 값을 자동 탐색합니다.
 
 ### Spoke Output Columns
 
-- `defect_rate`: 입력한 defect bin의 wafer 전체 chip 비율
-- `spoke_defect_rate`: 검출된 spoke 각도 구간에서 background를 차감한 spoke 기인 추정 불량률
-- `spoke_defect_chip_count_estimate`: spoke에 기인한 것으로 추정되는 background 보정 chip 수
-- `spoke_sector_defect_rate`: 검출된 spoke 각도 구간 내부의 실제 선택-bin 불량률
-- `spoke_background_defect_rate`: spoke 구간 바깥의 선택-bin 평균 불량률
-- `spoke_theta_center_deg`: 검출된 spoke 중심 각도
-- `spoke_fourier_signal`: low-frequency 집중도, sinc 유사도, smoothness와 broadband penalty를 결합한 대표 점수
-- `low_freq_fourier_signal`: low-frequency band의 Fourier energy 크기
-- `low_freq_energy_ratio`: 전체 Fourier energy 중 low-frequency band 비율
-- `sinc_similarity`: 실제 spectrum과 최적 sinc template의 유사도
+저장 CSV와 notebook의 `result`에는 아래 네 칼럼만 포함됩니다.
+
+- `root_lot_id`: root lot 식별값
+- `wafer_id`: wafer 식별값
+- `spoke_fail_rate`: 검출된 spoke 각도 구간에서 background를 차감한 spoke 기인 추정 fail rate
 - `estimated_spoke_width_deg`: 최적 sinc template에서 추정한 spoke 각도 폭
-- `spectral_smoothness`: spectrum이 불규칙한 spike보다 부드러운 파동 형태에 가까운 정도
-- `broadband_energy_ratio`: 전체 frequency에 퍼진 energy 비율
-- `signal_to_noise`: low-band RMS / broadband RMS 내부 참고값
-- `high_freq_fourier_signal`: 이전 출력 호환을 위해 남긴 broadband 진단값이며 정렬 기준으로 사용하지 않음
-- `theta_signal_df`: 선택 wafer의 theta-bin별 defect rate Polars DataFrame
-- `harmonic_spectrum_df`: 선택 wafer의 harmonic amplitude와 matched sinc template을 포함한 Polars DataFrame
 
 CLI로도 실행할 수 있습니다.
 
 ```bash
 python3 spoke_fourier.py input.csv \
-  --defect-bin-nos 12,13 \
+  --fail-bin-nos 12,13 \
   -o spoke_fourier_output.csv \
   --group-cols LOT,WF \
   --x-col X \
