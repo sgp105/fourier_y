@@ -588,7 +588,7 @@ def run_spoke_fourier(config: SpokeConfig, *, write_csv: bool = True) -> SpokeRu
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Compute high-frequency spoke Fourier signals from bin_no wafer maps.")
-    parser.add_argument("input_csv", type=Path, help="Input chip-level comma-separated .txt or .csv path.")
+    parser.add_argument("input_csv", type=Path, help="Input chip-level .txt or .csv path. Comma and tab delimiters are both tried.")
     parser.add_argument("--defect-bin-nos", required=True, help="Comma-separated bin_no values treated as defects.")
     parser.add_argument("-o", "--output-csv", type=Path, default=Path("spoke_fourier_output.csv"))
     parser.add_argument("--angular-bins", type=int, default=360)

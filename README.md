@@ -1,6 +1,6 @@
 # Fourier Y
 
-Wafer map chip-level `.csv` 또는 comma-separated `.txt` 파일에서 wafer별 annulus Fourier y-value를 계산하는 공유용 repository입니다.
+Wafer map chip-level `.csv` 또는 `.txt` 파일에서 wafer별 annulus Fourier y-value를 계산하는 공유용 repository입니다. 입력 구분자는 comma 또는 tab을 자동으로 시도합니다.
 
 ## Files
 

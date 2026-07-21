@@ -692,7 +692,7 @@ def run_fourier_y(config: FourierConfig, *, write_csv: bool = True) -> FourierRu
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Compute wafer-level annular Fourier y-value signals.")
-    parser.add_argument("input_csv", type=Path, help="Input chip-level comma-separated .txt or .csv path.")
+    parser.add_argument("input_csv", type=Path, help="Input chip-level .txt or .csv path. Comma and tab delimiters are both tried.")
     parser.add_argument("-o", "--output-csv", type=Path, default=Path("fourier_y_output.csv"))
     parser.add_argument("--inner-radius", type=float, default=0.6)
     parser.add_argument("--outer-radius", type=float, default=1.0)
