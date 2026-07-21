@@ -6,8 +6,9 @@ Wafer map chip-level `.csv` 또는 `.txt` 파일에서 wafer별 annulus Fourier 
 
 - `wafer_fourier_y.ipynb`: 사용자가 입력 파일, radius, target harmonic 등만 넣고 실행하는 notebook입니다.
 - `fourier_y.py`: 실제 CSV/TXT 로딩, encoding 처리, wafer polar normalization, Fourier 계산 로직입니다.
-- `spoke_fourier_analysis.ipynb`: `bin_no` 기반 spoke 형태 불량을 high-frequency Fourier signal로 찾는 notebook입니다.
-- `spoke_fourier.py`: spoke 분석용 CSV/TXT 로딩, wafer normalization, high-frequency spectrum 계산 로직입니다.
+- `spoke_fourier_analysis.ipynb`: `bin_no` 기반 spoke 형태 불량을 low-frequency 집중도와 sinc spectrum 형태로 찾는 notebook입니다.
+- `spoke_fourier.py`: spoke 분석용 CSV/TXT 로딩, wafer normalization, Fourier spectrum scoring 로직입니다.
+- `test_spoke_fourier.py`: radial spoke가 full ring보다 높은 점수를 받는지 확인하는 회귀 테스트입니다.
 - `requirements.txt`: 동작 확인용 Python package version입니다.
 
 ## Auto Install
@@ -168,8 +169,6 @@ BIN_NO_COL = "bin_no"
 DEFECT_BIN_NOS = [12]
 
 ANGULAR_BINS = 360
-HIGH_FREQ_MIN_HARMONIC = 8
-HIGH_FREQ_MAX_HARMONIC = None
 MIN_CHIPS = 20
 ```
 
@@ -217,23 +216,41 @@ p(theta_j) = mean(d_i | theta_i in bin_j)
 A_k = 2 * | mean((p(theta_j) - mean(p)) * exp(-i * k * theta_j)) |
 ```
 
-특정 harmonic을 고정하지 않고 high-frequency band 전체의 energy를 spoke score로 사용합니다.
+실제 spoke에서 나타나는 강한 low-frequency energy와 sinc 형태의 부드러운 spectrum을 보상하고, 전체 frequency에 퍼지는 ring 격자 artifact는 broadband energy와 spectral roughness로 감점합니다.
 
 ```text
-high_freq_fourier_signal = sqrt(0.5 * sum(A_k^2 for k in high-frequency band))
+E_low = sum(A_k^2 for k in low-frequency band)
+E_broad = sum(A_k^2 for k in broadband band)
+low_freq_energy_ratio = E_low / E_total
+
+T_k(width) = abs(sin(k * width / 2) / k)
+sinc_similarity = max cosine_similarity(A, T(width))
+
+spectral_smoothness = 1 / (1 + spectral_roughness)
+
+spoke_fourier_signal = sqrt(E_low / 2)
+    * low_freq_energy_ratio
+    * sinc_similarity
+    * spectral_smoothness
+    * (1 - broadband_energy_ratio)
 ```
 
-`ANGULAR_BINS = 360`이면 계산 가능한 harmonic은 `1..180`입니다.
+`ANGULAR_BINS = 360`이면 계산 가능한 harmonic은 `1..180`입니다. 기본 low-frequency band는 `1..72`, broadband band는 `90..180`이며 별도의 사용자 입력 없이 자동 설정됩니다. sinc template은 `1..45 degree` 폭에서 가장 잘 맞는 값을 자동 탐색합니다.
 
 ### Spoke Output Columns
 
 - `defect_rate`: 입력한 defect bin의 wafer 전체 chip 비율
-- `high_freq_fourier_signal`: high-frequency harmonic band의 Fourier energy score
-- `peak_high_freq_amplitude`: high-frequency band 안에서 가장 큰 단일 harmonic amplitude
-- `dominant_harmonic`: high-frequency band 안에서 amplitude가 가장 큰 harmonic
-- `signal_to_noise`: 내부 참고용 정규화 score
+- `spoke_fourier_signal`: low-frequency 집중도, sinc 유사도, smoothness와 broadband penalty를 결합한 대표 점수
+- `low_freq_fourier_signal`: low-frequency band의 Fourier energy 크기
+- `low_freq_energy_ratio`: 전체 Fourier energy 중 low-frequency band 비율
+- `sinc_similarity`: 실제 spectrum과 최적 sinc template의 유사도
+- `estimated_spoke_width_deg`: 최적 sinc template에서 추정한 spoke 각도 폭
+- `spectral_smoothness`: spectrum이 불규칙한 spike보다 부드러운 파동 형태에 가까운 정도
+- `broadband_energy_ratio`: 전체 frequency에 퍼진 energy 비율
+- `signal_to_noise`: low-band RMS / broadband RMS 내부 참고값
+- `high_freq_fourier_signal`: 이전 출력 호환을 위해 남긴 broadband 진단값이며 정렬 기준으로 사용하지 않음
 - `theta_signal_df`: 선택 wafer의 theta-bin별 defect rate Polars DataFrame
-- `harmonic_spectrum_df`: 선택 wafer의 harmonic amplitude spectrum Polars DataFrame
+- `harmonic_spectrum_df`: 선택 wafer의 harmonic amplitude와 matched sinc template을 포함한 Polars DataFrame
 
 CLI로도 실행할 수 있습니다.
 
@@ -245,6 +262,11 @@ python3 spoke_fourier.py input.csv \
   --x-col X \
   --y-col Y \
   --bin-col BIN \
-  --angular-bins 360 \
-  --high-freq-min-harmonic 8
+  --angular-bins 360
+```
+
+회귀 테스트는 아래 명령으로 실행합니다.
+
+```bash
+python3 -m unittest -v test_spoke_fourier.py
 ```

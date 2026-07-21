@@ -9,8 +9,9 @@ The requested bin_no value(s) are treated as defect bins. The selected raw
 columns are read as strings first, so numeric wafer IDs and values such as W01
 can coexist without Polars schema inference failures. All chip positions,
 including non-defect bins, are used to normalize each wafer map to a unit-radius
-disk. The defect indicator is averaged by theta bin, then high-frequency
-Fourier energy is used as the spoke signal score.
+disk. The defect indicator is averaged by theta bin. The spoke score rewards
+low-frequency energy concentration and similarity to the sinc-shaped spectrum
+of a localized angular pulse, while penalizing rough broadband energy.
 """
 
 from __future__ import annotations
@@ -73,8 +74,11 @@ class SpokeConfig:
     defect_bin_nos: object
     output_csv: Path = Path("spoke_fourier_output.csv")
     angular_bins: int = 360
-    high_freq_min_harmonic: int = 8
-    high_freq_max_harmonic: int | None = None
+    low_freq_max_harmonic: int | None = None
+    broadband_min_harmonic: int | None = None
+    sinc_width_min_deg: float = 1.0
+    sinc_width_max_deg: float = 45.0
+    sinc_width_step_deg: float = 0.5
     min_chips: int = 20
     group_cols: tuple[str, ...] = ("root_lot_id", "wafer_id")
     x_col: str = "chip_x_pos"
@@ -127,15 +131,23 @@ def _validate_config(config: SpokeConfig) -> None:
     if config.angular_bins < 4:
         raise ValueError("angular_bins must be >= 4.")
     max_harmonic = max_calculable_harmonic(config.angular_bins)
-    if config.high_freq_min_harmonic < 1:
-        raise ValueError("high_freq_min_harmonic must be >= 1.")
-    if config.high_freq_min_harmonic > max_harmonic:
-        raise ValueError(f"high_freq_min_harmonic cannot exceed {max_harmonic}.")
-    if config.high_freq_max_harmonic is not None:
-        if config.high_freq_max_harmonic < config.high_freq_min_harmonic:
-            raise ValueError("high_freq_max_harmonic must be >= high_freq_min_harmonic.")
-        if config.high_freq_max_harmonic > max_harmonic:
-            raise ValueError(f"high_freq_max_harmonic cannot exceed {max_harmonic}.")
+    low_freq_max, broadband_min = resolve_spectrum_bands(
+        angular_bins=config.angular_bins,
+        low_freq_max_harmonic=config.low_freq_max_harmonic,
+        broadband_min_harmonic=config.broadband_min_harmonic,
+    )
+    if low_freq_max >= broadband_min:
+        raise ValueError("low_freq_max_harmonic must be smaller than broadband_min_harmonic.")
+    if config.sinc_width_min_deg <= 0:
+        raise ValueError("sinc_width_min_deg must be > 0.")
+    if config.sinc_width_max_deg < config.sinc_width_min_deg:
+        raise ValueError("sinc_width_max_deg must be >= sinc_width_min_deg.")
+    if config.sinc_width_step_deg <= 0:
+        raise ValueError("sinc_width_step_deg must be > 0.")
+    if config.sinc_width_max_deg >= 360:
+        raise ValueError("sinc_width_max_deg must be < 360.")
+    if max_harmonic < 2:
+        raise ValueError("angular_bins must provide at least two calculable harmonics.")
     if config.min_chips < 1:
         raise ValueError("min_chips must be >= 1.")
 
@@ -335,6 +347,27 @@ def max_calculable_harmonic(angular_bins: int) -> int:
     return angular_bins // 2
 
 
+def resolve_spectrum_bands(
+    *,
+    angular_bins: int = 360,
+    low_freq_max_harmonic: int | None = None,
+    broadband_min_harmonic: int | None = None,
+) -> tuple[int, int]:
+    """Resolve low-frequency and broadband boundaries for the angular spectrum."""
+
+    max_harmonic = max_calculable_harmonic(angular_bins)
+    default_low_max = max(1, min(max_harmonic - 1, int(round(max_harmonic * 0.40))))
+    low_max = default_low_max if low_freq_max_harmonic is None else int(low_freq_max_harmonic)
+    default_broadband_min = max(low_max + 1, int(round(max_harmonic * 0.50)))
+    broadband_min = default_broadband_min if broadband_min_harmonic is None else int(broadband_min_harmonic)
+
+    if low_max < 1 or low_max >= max_harmonic:
+        raise ValueError(f"low_freq_max_harmonic must be in 1..{max_harmonic - 1}.")
+    if broadband_min <= low_max or broadband_min > max_harmonic:
+        raise ValueError(f"broadband_min_harmonic must be in {low_max + 1}..{max_harmonic}.")
+    return low_max, broadband_min
+
+
 def high_frequency_harmonics(
     *,
     angular_bins: int = 360,
@@ -384,6 +417,110 @@ def _band_rms_from_amplitudes(amplitudes: Iterable[float]) -> float:
     if values.size == 0:
         return float("nan")
     return float(np.sqrt(np.sum(values**2) / 2.0))
+
+
+def sinc_template_amplitudes(harmonics: Iterable[int], width_deg: float) -> np.ndarray:
+    """Return the magnitude shape of a rectangular angular pulse spectrum."""
+
+    harmonic_values = np.asarray(list(harmonics), dtype=float)
+    if width_deg <= 0 or width_deg >= 360:
+        raise ValueError("width_deg must be in (0, 360).")
+    width_rad = math.radians(width_deg)
+    return np.abs(np.sin(harmonic_values * width_rad / 2.0) / harmonic_values)
+
+
+def _sinc_template_bank(
+    harmonics: np.ndarray,
+    *,
+    min_width_deg: float,
+    max_width_deg: float,
+    width_step_deg: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    widths = np.arange(min_width_deg, max_width_deg + width_step_deg * 0.5, width_step_deg, dtype=float)
+    templates = np.vstack([sinc_template_amplitudes(harmonics, width) for width in widths])
+    norms = np.linalg.norm(templates, axis=1, keepdims=True)
+    normalized = np.divide(templates, norms, out=np.zeros_like(templates), where=norms > EPSILON)
+    return widths, normalized
+
+
+def _score_spoke_spectrum(
+    harmonics: np.ndarray,
+    amplitudes: np.ndarray,
+    *,
+    low_freq_max_harmonic: int,
+    broadband_min_harmonic: int,
+    sinc_widths_deg: np.ndarray,
+    normalized_sinc_templates: np.ndarray,
+) -> dict[str, object]:
+    values = np.where(np.isfinite(amplitudes), np.maximum(amplitudes, 0.0), 0.0)
+    low_mask = harmonics <= low_freq_max_harmonic
+    broadband_mask = harmonics >= broadband_min_harmonic
+
+    total_energy = float(np.sum(values**2))
+    low_energy = float(np.sum(values[low_mask] ** 2))
+    broadband_energy = float(np.sum(values[broadband_mask] ** 2))
+    low_signal = float(math.sqrt(low_energy / 2.0))
+    broadband_signal = float(math.sqrt(broadband_energy / 2.0))
+    low_energy_ratio = low_energy / (total_energy + EPSILON)
+    broadband_energy_ratio = broadband_energy / (total_energy + EPSILON)
+
+    low_rms = float(np.sqrt(np.mean(values[low_mask] ** 2)))
+    broadband_rms = float(np.sqrt(np.mean(values[broadband_mask] ** 2)))
+    signal_to_noise = low_rms / (broadband_rms + EPSILON)
+    noise_floor = float(np.median(values[broadband_mask]))
+    excess = np.maximum(values - noise_floor, 0.0)
+    excess_energy = float(np.sum(excess**2))
+
+    if excess_energy > EPSILON:
+        normalized_excess = excess / math.sqrt(excess_energy)
+        similarities = normalized_sinc_templates @ normalized_excess
+        best_index = int(np.argmax(similarities))
+        sinc_similarity = float(np.clip(similarities[best_index], 0.0, 1.0))
+        estimated_width_deg = float(sinc_widths_deg[best_index])
+        roughness = float(np.sum(np.diff(excess) ** 2) / excess_energy)
+        smoothness = float(1.0 / (1.0 + roughness))
+        raw_template = sinc_template_amplitudes(harmonics, estimated_width_deg)
+        template_scale = float(np.dot(excess, raw_template) / (np.dot(raw_template, raw_template) + EPSILON))
+    else:
+        sinc_similarity = 0.0
+        estimated_width_deg = float("nan")
+        roughness = float("nan")
+        smoothness = 0.0
+        template_scale = 0.0
+
+    broadband_penalty = max(0.0, 1.0 - broadband_energy_ratio)
+    spoke_signal = low_signal * low_energy_ratio * sinc_similarity * smoothness * broadband_penalty
+
+    if total_energy > EPSILON:
+        dominant_index = int(np.argmax(values))
+        dominant_harmonic: int | None = int(harmonics[dominant_index])
+        peak_amplitude = float(values[dominant_index])
+    else:
+        dominant_harmonic = None
+        peak_amplitude = 0.0
+
+    broadband_values = values[broadband_mask]
+    broadband_peak_amplitude = float(np.max(broadband_values)) if broadband_values.size else 0.0
+    return {
+        "spoke_fourier_signal": float(spoke_signal),
+        "low_freq_fourier_signal": low_signal,
+        "broadband_fourier_signal": broadband_signal,
+        "low_freq_energy_ratio": float(low_energy_ratio),
+        "broadband_energy_ratio": float(broadband_energy_ratio),
+        "sinc_similarity": sinc_similarity,
+        "estimated_spoke_width_deg": estimated_width_deg,
+        "sinc_template_scale": template_scale,
+        "spectral_noise_floor": noise_floor,
+        "spectral_roughness": roughness,
+        "spectral_smoothness": smoothness,
+        "signal_to_noise": float(signal_to_noise),
+        "dominant_harmonic": dominant_harmonic,
+        "peak_harmonic_amplitude": peak_amplitude,
+        "broadband_peak_amplitude": broadband_peak_amplitude,
+        # Compatibility aliases retained as diagnostic broadband values.
+        "high_freq_fourier_signal": broadband_signal,
+        "peak_high_freq_amplitude": broadband_peak_amplitude,
+    }
 
 
 def build_wafer_theta_signal(
@@ -549,18 +686,35 @@ def compute_spoke_signals(
     *,
     group_cols: list[str],
     angular_bins: int,
-    high_freq_min_harmonic: int,
-    high_freq_max_harmonic: int | None,
-    min_chips: int,
+    low_freq_max_harmonic: int | None = None,
+    broadband_min_harmonic: int | None = None,
+    sinc_width_min_deg: float = 1.0,
+    sinc_width_max_deg: float = 45.0,
+    sinc_width_step_deg: float = 0.5,
+    min_chips: int = 20,
 ) -> pl.DataFrame:
     _validate_columns(analysis_df, [*group_cols, "_theta", "_is_defect"])
+    if sinc_width_min_deg <= 0 or sinc_width_max_deg < sinc_width_min_deg or sinc_width_max_deg >= 360:
+        raise ValueError("sinc template widths must satisfy 0 < min <= max < 360 degrees.")
+    if sinc_width_step_deg <= 0:
+        raise ValueError("sinc_width_step_deg must be > 0.")
+    if min_chips < 1:
+        raise ValueError("min_chips must be >= 1.")
 
-    high_harmonics = high_frequency_harmonics(
+    low_freq_max, broadband_min = resolve_spectrum_bands(
         angular_bins=angular_bins,
-        min_harmonic=high_freq_min_harmonic,
-        max_harmonic=high_freq_max_harmonic,
+        low_freq_max_harmonic=low_freq_max_harmonic,
+        broadband_min_harmonic=broadband_min_harmonic,
     )
     max_harmonic = max_calculable_harmonic(angular_bins)
+    harmonics = np.arange(1, max_harmonic + 1, dtype=int)
+    harmonic_list = harmonics.tolist()
+    sinc_widths, sinc_templates = _sinc_template_bank(
+        harmonics,
+        min_width_deg=sinc_width_min_deg,
+        max_width_deg=sinc_width_max_deg,
+        width_step_deg=sinc_width_step_deg,
+    )
     records: list[dict[str, object]] = []
 
     for key, group in _partition_items(analysis_df, group_cols):
@@ -580,16 +734,32 @@ def compute_spoke_signals(
         record["defect_rate"] = float(defect_chip_count / total_chip_count) if total_chip_count else 0.0
         record["angular_bins"] = angular_bins
         record["max_calculable_harmonic"] = max_harmonic
-        record["high_freq_min_harmonic"] = high_harmonics[0]
-        record["high_freq_max_harmonic"] = high_harmonics[-1]
+        record["low_freq_max_harmonic"] = low_freq_max
+        record["broadband_min_harmonic"] = broadband_min
+        record["broadband_max_harmonic"] = max_harmonic
+        record["high_freq_min_harmonic"] = broadband_min
+        record["high_freq_max_harmonic"] = max_harmonic
 
         if total_chip_count < min_chips:
             record["theta_bins_with_chips"] = 0
             record["theta_coverage"] = 0.0
             record["mean_theta_defect_rate"] = float("nan")
             record["std_theta_defect_rate"] = float("nan")
+            record["spoke_fourier_signal"] = float("nan")
+            record["low_freq_fourier_signal"] = float("nan")
+            record["broadband_fourier_signal"] = float("nan")
+            record["low_freq_energy_ratio"] = float("nan")
+            record["broadband_energy_ratio"] = float("nan")
+            record["sinc_similarity"] = float("nan")
+            record["estimated_spoke_width_deg"] = float("nan")
+            record["sinc_template_scale"] = float("nan")
+            record["spectral_noise_floor"] = float("nan")
+            record["spectral_roughness"] = float("nan")
+            record["spectral_smoothness"] = float("nan")
             record["high_freq_fourier_signal"] = float("nan")
             record["peak_high_freq_amplitude"] = float("nan")
+            record["peak_harmonic_amplitude"] = float("nan")
+            record["broadband_peak_amplitude"] = float("nan")
             record["dominant_harmonic"] = None
             record["dominant_phase_rad"] = float("nan")
             record["signal_to_noise"] = float("nan")
@@ -606,16 +776,23 @@ def compute_spoke_signals(
         record["mean_theta_defect_rate"] = float(np.mean(defect_rate)) if defect_rate.size else float("nan")
         record["std_theta_defect_rate"] = float(np.std(defect_rate)) if defect_rate.size else float("nan")
 
-        amplitudes = _fourier_amplitudes(theta, defect_rate, high_harmonics)
-        dominant_harmonic = max(high_harmonics, key=lambda harmonic: amplitudes[harmonic])
-        high_freq_signal = _band_rms_from_amplitudes(amplitudes.values())
-        peak_amplitude = amplitudes[dominant_harmonic]
-
-        record["high_freq_fourier_signal"] = high_freq_signal
-        record["peak_high_freq_amplitude"] = peak_amplitude
-        record["dominant_harmonic"] = int(dominant_harmonic)
-        record["dominant_phase_rad"] = _fourier_phase(theta, defect_rate, dominant_harmonic)
-        record["signal_to_noise"] = float(high_freq_signal / (record["std_theta_defect_rate"] + EPSILON))
+        amplitude_map = _fourier_amplitudes(theta, defect_rate, harmonic_list)
+        amplitude_values = np.array([amplitude_map[harmonic] for harmonic in harmonic_list], dtype=float)
+        spectrum_metrics = _score_spoke_spectrum(
+            harmonics,
+            amplitude_values,
+            low_freq_max_harmonic=low_freq_max,
+            broadband_min_harmonic=broadband_min,
+            sinc_widths_deg=sinc_widths,
+            normalized_sinc_templates=sinc_templates,
+        )
+        record.update(spectrum_metrics)
+        dominant_harmonic = spectrum_metrics["dominant_harmonic"]
+        record["dominant_phase_rad"] = (
+            _fourier_phase(theta, defect_rate, int(dominant_harmonic))
+            if dominant_harmonic is not None
+            else float("nan")
+        )
         records.append(record)
 
     return pl.DataFrame(records)
@@ -639,12 +816,15 @@ def run_spoke_fourier(config: SpokeConfig, *, write_csv: bool = True) -> SpokeRu
         analysis_df,
         group_cols=group_cols,
         angular_bins=config.angular_bins,
-        high_freq_min_harmonic=config.high_freq_min_harmonic,
-        high_freq_max_harmonic=config.high_freq_max_harmonic,
+        low_freq_max_harmonic=config.low_freq_max_harmonic,
+        broadband_min_harmonic=config.broadband_min_harmonic,
+        sinc_width_min_deg=config.sinc_width_min_deg,
+        sinc_width_max_deg=config.sinc_width_max_deg,
+        sinc_width_step_deg=config.sinc_width_step_deg,
         min_chips=config.min_chips,
     )
-    if config.sort_by_score and result.height and "high_freq_fourier_signal" in result.columns:
-        result = result.sort("high_freq_fourier_signal", descending=True, nulls_last=True)
+    if config.sort_by_score and result.height and "spoke_fourier_signal" in result.columns:
+        result = result.sort("spoke_fourier_signal", descending=True, nulls_last=True)
     if write_csv:
         config.output_csv.parent.mkdir(parents=True, exist_ok=True)
         result.write_csv(config.output_csv)
@@ -652,13 +832,16 @@ def run_spoke_fourier(config: SpokeConfig, *, write_csv: bool = True) -> SpokeRu
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Compute high-frequency spoke Fourier signals from bin_no wafer maps.")
+    parser = argparse.ArgumentParser(description="Compute low-frequency coherent spoke Fourier signals from bin_no wafer maps.")
     parser.add_argument("input_csv", type=Path, help="Input chip-level .txt or .csv path. Comma and tab delimiters are both tried.")
     parser.add_argument("--defect-bin-nos", required=True, help="Comma-separated bin_no values treated as defects.")
     parser.add_argument("-o", "--output-csv", type=Path, default=Path("spoke_fourier_output.csv"))
     parser.add_argument("--angular-bins", type=int, default=360)
-    parser.add_argument("--high-freq-min-harmonic", type=int, default=8)
-    parser.add_argument("--high-freq-max-harmonic", type=int, default=None)
+    parser.add_argument("--low-freq-max-harmonic", type=int, default=None)
+    parser.add_argument("--broadband-min-harmonic", type=int, default=None)
+    parser.add_argument("--sinc-width-min-deg", type=float, default=1.0)
+    parser.add_argument("--sinc-width-max-deg", type=float, default=45.0)
+    parser.add_argument("--sinc-width-step-deg", type=float, default=0.5)
     parser.add_argument("--min-chips", type=int, default=20)
     parser.add_argument("--group-cols", default="root_lot_id,wafer_id")
     parser.add_argument("--x-col", default="chip_x_pos")
@@ -674,8 +857,11 @@ def main() -> None:
         defect_bin_nos=_split_columns(args.defect_bin_nos),
         output_csv=args.output_csv,
         angular_bins=args.angular_bins,
-        high_freq_min_harmonic=args.high_freq_min_harmonic,
-        high_freq_max_harmonic=args.high_freq_max_harmonic,
+        low_freq_max_harmonic=args.low_freq_max_harmonic,
+        broadband_min_harmonic=args.broadband_min_harmonic,
+        sinc_width_min_deg=args.sinc_width_min_deg,
+        sinc_width_max_deg=args.sinc_width_max_deg,
+        sinc_width_step_deg=args.sinc_width_step_deg,
         min_chips=args.min_chips,
         group_cols=_split_columns(args.group_cols),
         x_col=args.x_col,
