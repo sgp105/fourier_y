@@ -38,6 +38,8 @@ last_update_time
 
 입력 파일은 `.csv` 또는 `.txt`를 사용합니다. 기본은 comma-separated 형식이며, fallback 경로에서는 tab, semicolon, pipe delimiter도 순서대로 시도합니다. UTF-8, CP949/EUC-KR, UTF-16 계열 export를 자동으로 처리합니다.
 
+행 끝에 delimiter가 추가로 붙어 row별 칼럼 수가 달라지는 경우에는 초과 칼럼을 잘라내고 필요한 칼럼만 읽습니다.
+
 같은 `root_lot_id + wafer_id`에 여러 snapshot이 있으면 `last_update_time`이 가장 최신인 row만 사용합니다.
 
 사용자는 `item_id` 칼럼값도 입력합니다. 예를 들어 `item_id`가 `MSR0022`인 row만 계산하려면 notebook에서 `ITEM_ID = "MSR0022"`로 지정합니다.

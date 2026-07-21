@@ -177,6 +177,7 @@ def _read_csv_projection(path: Path, selected: list[str], projection: list[str])
         separator=",",
         columns=projection,
         schema_overrides={column: pl.Utf8 for column in projection},
+        truncate_ragged_lines=True,
     )
     return df.rename({column: _normalize_column_name(column) for column in df.columns}).select(selected)
 
@@ -201,7 +202,7 @@ def _read_decoded_csv_with_separator(text: str, selected: list[str], separator: 
 
 
 def _read_plain_csv(path: Path, selected: list[str]) -> pl.DataFrame:
-    header = pl.read_csv(path, has_header=True, separator=",", n_rows=0)
+    header = pl.read_csv(path, has_header=True, separator=",", n_rows=0, truncate_ragged_lines=True)
     if any("\x00" in column for column in header.columns):
         raise ValueError("NUL-padded column names detected; retrying with decoded text.")
     projection = _projection_columns(header.columns, selected)
